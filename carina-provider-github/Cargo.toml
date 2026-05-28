@@ -1,0 +1,30 @@
+[package]
+name = "carina-provider-github"
+version.workspace = true
+edition = "2024"
+license = "MIT"
+description = "GitHub provider for Carina infrastructure management tool"
+repository = "https://github.com/carina-rs/carina-provider-github"
+homepage = "https://github.com/carina-rs/carina-provider-github"
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "carina-provider-github"
+path = "src/main.rs"
+
+[features]
+default = ["native"]
+native = []
+
+# Dependency list intentionally minimal at the scaffold stage. The
+# carina-core / carina-plugin-sdk / carina-provider-protocol pins +
+# resource-implementation deps land in the follow-up implementation PR
+# (see docs/design.md). Keeping this PR scaffold-only means the
+# carina-pin CI gate is added by the implementation PR, not here.
+[dependencies]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
