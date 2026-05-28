@@ -129,6 +129,26 @@ out PAT as the bootstrap path:
   fetch is one REST call cached for the lifetime of the provider
   process.
 
+### Fallback when `auth` is unspecified
+
+If the `auth` block is omitted, the provider does not error out
+immediately. It asks the carina-plugin-host to resolve a GitHub token
+via a host-side credential resolver, whose design is tracked
+separately in
+[carina-rs/carina#3344](https://github.com/carina-rs/carina/issues/3344).
+The first concrete resolver chain is `GITHUB_TOKEN` env var → `gh auth
+token` subprocess; both run in the **host** process so they work
+identically for native and `wasm32-wasip2` builds of this provider.
+
+This is the path that lets a developer with `gh auth login` already
+configured run `carina plan` against a `provider "github" { ... }`
+block without provisioning any PAT.
+
+Concrete WIT shape, resolver chain order, and the cross-repo
+implementation chain (plugin-wit → carina → aws/awscc rev bump → this
+repo) are settled in carina#3344 before this provider's
+resource-implementation PR lands.
+
 ### Request execution
 
 All HTTP traffic goes through `wasi:http/outgoing-handler@0.2`, the
