@@ -65,13 +65,10 @@ carina-provider-protocol = { path = "../carina/carina-provider-protocol" }
 
 ### Worktree-Based Development
 
-**IMPORTANT: Use `git wt` (NOT `git worktree`).** `git wt` is a
-separate tool with its own syntax.
-
 ```bash
-git wt <branch-name> main    # Create worktree
-git wt                       # List worktrees
-git wt -d <branch-name>      # Delete worktree (from main worktree)
+git worktree add .worktrees/<branch-name> -b <branch-name> main   # Create worktree
+git worktree list                                                  # List worktrees
+git worktree remove .worktrees/<branch-name>                       # Delete worktree (from the main worktree)
 ```
 
 ### Submodule Initialization
