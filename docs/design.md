@@ -1,278 +1,187 @@
-# carina-provider-github — bootstrap design
+# carina-provider-github — design
 
-<!-- constrained-by https://github.com/carina-rs/carina/issues/3342 -->
-<!-- constrained-by https://github.com/carina-rs/registry/blob/main/docs/dogfooding-design.md -->
+<!-- constrained-by https://github.com/carina-rs/carina-provider-github/issues/4 -->
+<!-- constrained-by https://github.com/carina-rs/carina/issues/4193 -->
 
-This document records the design decisions for the initial release of
-`carina-rs/carina-provider-github`. It is intentionally narrow: only what
-the registry dogfooding pipeline needs to declare a GitHub App's private
-key + ID into the `carina-rs` Org-level Actions secrets/variables via
-Carina, not a complete GitHub provider.
+This document records the design of the first release of
+`carina-rs/carina-provider-github`. It replaces the May 2026 bootstrap
+design, which targeted Org-level Actions secrets and variables for the
+registry dogfooding pipeline. That consumer went away when
+carina-rs/carina#3342 was closed as not planned, and the design also
+predated the current plugin SDK.
 
-The implementation is split across PRs. **This PR adds the scaffold and
-this document only**; the two resources land in follow-up PRs so each
-review stays focused.
+The first release manages exactly one resource. More resources are added
+only when a concrete use case appears.
 
-## Goals
+## Resource: `github.actions.OidcSubject`
 
-- Manage GitHub Org-level Actions secrets and variables from a Carina
-  `.crn` file, dogfooding the registry pipeline end-to-end.
-- Mirror the structural conventions of `carina-rs/carina-provider-aws`
-  / `-awscc` (Cargo workspace layout, WIT pin, CI matrix, release
-  workflow) so that maintenance patterns transfer.
-- Keep the surface small enough that the v1 binary builds cleanly to
-  both native and `wasm32-wasip2`.
-
-## Non-goals (explicit)
-
-These are out of scope for the v1 release and will be added only when a
-concrete use case appears:
-
-- Repository secrets, repository variables, environment secrets.
-- Repository management, team management, branch protections,
-  CODEOWNERS, etc.
-- OpenAPI / schema-driven codegen (the `aws` / `awscc` providers use
-  schema-driven codegen; with two hand-rolled resources we do not need
-  it yet).
-- Listing this provider in `carina-rs/registry`. The registry pipeline
-  that this provider is bootstrapping will eventually ingest it, but
-  not in the initial release.
-
-## Initial resource scope
-
-| Carina resource                       | Wraps                                                                |
-| ------------------------------------- | -------------------------------------------------------------------- |
-| `github.actions.OrganizationSecret`   | `PUT /orgs/{org}/actions/secrets/{secret_name}`                      |
-| `github.actions.OrganizationVariable` | `PUT /orgs/{org}/actions/variables/{name}`                           |
-
-### Resource identity
-
-GitHub returns no opaque ID for either resource — only the name is
-stable across reads. Carina state keys both resources on `name` (the
-secret/variable name) scoped under the configured `organization`. The
-combined natural key is `{organization}/{name}`; this maps directly to
-the REST URL path components, so reads, updates, and deletes can be
-issued without any extra round-trip.
-
-### Attribute shape (sketch — final form lands in the implementation PR)
+A repository's GitHub Actions OIDC subject-claim customization: which
+claims GitHub puts into the `sub` of the OIDC token that workflows in that
+repository receive. Cloud trust policies (for example AWS IAM role trust
+conditions) match on this value, so it is security-relevant configuration
+that today is changed by hand.
 
 ```crn
-provider "github" {
-  organization = "carina-rs"
-  // auth: see "Authentication" below
-}
-
-github.actions.OrganizationSecret {
-  name              = "MY_SECRET"
-  plaintext_value   = "..."           // write-only; never read back
-  visibility        = github.actions.SecretVisibility.all
-  // selected_repository_ids = [ ... ]  // only when visibility = selected
-}
-
-github.actions.OrganizationVariable {
-  name       = "MY_VAR"
-  value      = "..."
-  visibility = github.actions.VariableVisibility.all
+github.actions.OidcSubject {
+  repository = "carina-rs/carina"
+  claim_keys = [repo, context, job_workflow_ref]
 }
 ```
 
-Notes:
+It wraps the REST endpoints
+`GET` / `PUT /repos/{owner}/{repo}/actions/oidc/customization/sub`
+(<https://docs.github.com/en/rest/actions/oidc>).
 
-- `plaintext_value` is a write-only attribute. GitHub's read endpoint
-  never returns the secret value, so the provider treats it as
-  `Value::Unknown` on read and reconciles drift via a hash stored in
-  state (similar to how Terraform's `github` provider handles
-  `plaintext_value`). The exact reconciliation shape is finalized in
-  the resource-implementation PR.
-- `visibility` enums use Carina's standard DSL spelling: snake_case
-  identifiers (`all`, `private`, `selected`) bound to a namespaced
-  type, per the project-wide DSL enum convention.
+### Attributes
+
+| Attribute    | Shape                                   | Notes |
+| ------------ | --------------------------------------- | ----- |
+| `repository` | string, `owner/repo`                    | Required, create-only, identity. |
+| `claim_keys` | ordered list of `ClaimKey`, length ≥ 1, unique | Optional. Omitted means GitHub's default subject. |
+
+There is no `mode` attribute. Whether the repository uses the default is
+expressed by whether `claim_keys` is present, so "custom mode with no
+keys" and "default mode with keys" cannot be written.
+
+`repository` is matched against `^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$` by a
+refined string, so a malformed value is rejected by `carina validate`.
+
+`claim_keys` is ordered because GitHub builds the subject in list order
+(`repo:…:context:…:job_workflow_ref:…`). Reordering it changes the
+subject, so it is a real change and is compared positionally.
+
+Empty lists are rejected by the list length minimum. Duplicates are
+rejected by the declarative unique-elements refinement from
+carina-rs/carina#4193, so `carina validate`, plan and the LSP all report
+them. GitHub also requires unique keys.
+
+### `ClaimKey`
+
+A closed enum, `github.actions.OidcSubject.ClaimKey`. Values are GitHub's
+own spellings, which are already snake_case, so there are no aliases. The
+DSL accepts the bare form (`repo`), as other enum lists do.
+
+The values are `repo` and `context` (subject segments GitHub documents for
+customization) plus the token claims GitHub publishes in `claims_supported`
+at `https://token.actions.githubusercontent.com/.well-known/openid-configuration`,
+except the registered JWT claims (`sub`, `aud`, `exp`, `iat`, `iss`, `jti`,
+`nbf`): `actor`, `actor_id`, `base_ref`, `check_run_id`, `enterprise`,
+`enterprise_id`, `environment`, `environment_node_id`, `event_name`,
+`head_ref`, `issuer_scope`, `job_workflow_ref`, `job_workflow_sha`, `ref`,
+`ref_protected`, `ref_type`, `repository`, `repository_id`,
+`repository_owner`, `repository_owner_id`, `repository_visibility`,
+`run_attempt`, `run_id`, `run_number`, `runner_environment`, `sha`,
+`workflow`, `workflow_ref`, `workflow_sha`.
+
+Custom-property keys (`repo_property_<name>`) have no fixed name and are
+not supported in the first release. A claim GitHub adds later needs a
+provider release.
+
+### Operations
+
+- **Create**: `PUT {"use_default": false, "include_claim_keys": [...]}`
+  when `claim_keys` is set, otherwise `PUT {"use_default": true}`. The
+  setting always exists on a repository, so create is "set", not
+  "insert"; the identifier is the `owner/repo` string.
+- **Read**: `GET`. `use_default: true` reads back as `claim_keys` absent.
+  `use_default: false` with keys reads back as those keys in order. A
+  repository that is not on the default but has no keys (it inherits an
+  org template, which this provider never writes) reads back as an empty
+  list. The DSL cannot author an empty list, so plan shows a change and
+  apply rewrites it. A 404 for the repository reads as not found.
+- **Update**: the same `PUT` with the desired state. Removing
+  `claim_keys` resets to the default.
+- **Delete**: `PUT {"use_default": true}`, which GitHub documents as the
+  way to reset a repository to the default subject. A 404 for the
+  repository counts as already deleted.
+- **Default `prevent_destroy`** (carina#4150) is declared on the type from
+  the start, because deleting it changes the subject every downstream
+  trust policy matches on. Users opt out with
+  `directives { prevent_destroy = false }`.
+
+All operations are synchronous. Create/update/delete tokens are `Never`.
+A request that fails before it is transmitted, or with a definite 4xx, is
+reported as not applied. A timeout or 5xx after transmit keeps the attempt
+pending, so the next apply re-reads instead of assuming success.
+
+`use_immutable_subject` and `sub_claim_prefix` are not managed. Requests
+never send `use_immutable_subject`, so this provider leaves it as is.
 
 ## Authentication
 
-Both **Personal Access Token (PAT)** and **GitHub App** authentication
-ship in v1. The provider's `auth` block is a tagged variant:
+The provider reads `GITHUB_TOKEN` from its environment. The host passes
+only that variable to a GitHub-kind provider (carina-plugin-host
+`GITHUB_ENV_ALLOWLIST`); AWS credentials never reach it, and the provider
+must not import the AWS credentials interface. There is no `auth` block
+and no in-provider token minting. A missing token is a configuration
+error at initialization, before any request.
 
-```crn
-provider "github" {
-  organization = "carina-rs"
+Required permission: Actions write on the repository (fine-grained PAT),
+or the `repo` scope (classic PAT). Whether an Actions workflow
+`GITHUB_TOKEN` with `permissions: actions: write` is enough is verified by
+the acceptance run, not assumed.
 
-  // Either:
-  auth = github.Auth.pat {
-    token = env.GITHUB_TOKEN  // or a literal string
-  }
+## Network
 
-  // Or:
-  auth = github.Auth.app {
-    app_id          = 123456
-    installation_id = 789012
-    private_key_pem = file("github-app.pem")
-  }
-}
-```
+`export_provider!(GithubProvider, http, egress: ["api.github.com"])`. An
+exact host matches only that host. The host enforces the declaration per
+request, consent is recorded by `carina init` in `carina-providers.lock`,
+and private, loopback and metadata addresses are denied for the GitHub
+kind. HTTP goes through `carina_plugin_sdk::wasi_http::send_request`.
 
-Rationale for shipping both at once even though the issue body called
-out PAT as the bootstrap path:
+## Trust and naming
 
-- The chicken-and-egg argument (the App is the thing this provider is
-  used to declare) applies to **the carina-rs Org's own App**, not to
-  Apps in general. As soon as another consumer wants to drive the
-  provider from CI under a pre-existing App installation, App auth is
-  immediately load-bearing.
-- App auth shares ~all infrastructure with PAT (request signing is the
-  only delta — a short-lived installation token is minted via JWT and
-  then carried in the same `Authorization: Bearer …` header that PAT
-  uses). Splitting the two into separate PRs would duplicate the
-  bring-up cost of the auth scaffold.
-- The implementation cost is bounded: JWT signing uses `jsonwebtoken`
-  (pure Rust, builds on `wasm32-wasip2`), and the installation-token
-  fetch is one REST call cached for the lifetime of the provider
-  process.
+The host classifies `github.com/carina-rs/carina-provider-github` and the
+registry name `carina-rs/github` as the GitHub kind, and requires the
+configured provider name to be exactly `github`. For local development,
+load a built WASM through `source = "file:///…/carina-provider-github.wasm"`
+with `--trust-local-provider <path>=github`.
 
-### Fallback when `auth` is unspecified
+## Crate shape
 
-If the `auth` block is omitted, the provider does not error out
-immediately. It asks the carina-plugin-host to resolve a GitHub token
-via a host-side credential resolver, whose design is tracked
-separately in
-[carina-rs/carina#3344](https://github.com/carina-rs/carina/issues/3344).
-The first concrete resolver chain is `GITHUB_TOKEN` env var → `gh auth
-token` subprocess; both run in the **host** process so they work
-identically for native and `wasm32-wasip2` builds of this provider.
+- One crate, `carina-provider-github`, built as `wasm32-wasip2` only.
+  There are no native release binaries and no `native` feature.
+- Dependencies: `carina-plugin-sdk` pinned by exact `rev` (the SDK
+  re-exports `carina-core` and `carina-provider-protocol`), `http`,
+  `serde`, `serde_json`. No `wit-bindgen` and no `carina-plugin-wit`
+  submodule: since carina-rs/carina#4191 the SDK owns the WIT and the
+  bindings.
+- The GitHub API sits behind a small trait. The WASM build uses an HTTP
+  implementation, and native tests use a fake. Tests drive create through
+  `carina_plugin_sdk::dispatch_create`.
+- `scripts/check-carina-pin.sh` and `.carina-core-min-rev` keep the
+  pinning pattern of the AWS providers.
+- A copy of carina's `scripts/check-provider-sdk-bindings.sh` runs in CI,
+  so a direct `wit-bindgen` or bindings dependency cannot come back.
 
-This is the path that lets a developer with `gh auth login` already
-configured run `carina plan` against a `provider "github" { ... }`
-block without provisioning any PAT.
+## Testing
 
-Concrete WIT shape, resolver chain order, and the cross-repo
-implementation chain (plugin-wit → carina → aws/awscc rev bump → this
-repo) are settled in carina#3344 before this provider's
-resource-implementation PR lands.
+- Unit tests through the fake API: create/read/update/delete, default
+  versus custom read-back, the org-template read-back, 404 handling, and
+  that requests never carry `use_immutable_subject`.
+- Schema tests: validation rejects a malformed `repository`, an empty
+  `claim_keys` and a duplicate key; bare and qualified enum spellings are
+  accepted.
+- A real-WASM acceptance test runs plan/apply/destroy against a repository
+  in the `carina-test` org only. carina-rs repositories are never used as
+  test targets.
 
-### Request execution
+## CI and release
 
-All HTTP traffic goes through `wasi:http/outgoing-handler@0.2`, the
-same path the AWS providers use after carina#3254. The provider
-constructs `http::Request` instances and sends them via
-`carina-plugin-sdk`'s WASI HTTP wrapper; no `reqwest` / `hyper` /
-`ureq` dependency is introduced.
+CI runs `check`, `test`, `clippy -D warnings`, `fmt --check`, a
+`wasm32-wasip2` release build, the pin check and the bindings guard.
 
-## Secret-value encryption
+Release uses `carina-rs/provider-release` (the reusable WASM build plus
+the `github-release`, `publish` and `yank` actions, pinned by SHA), as the
+AWS providers do. The first release goes to the dev registry. A formal
+release tag needs the user's approval.
 
-GitHub requires Org Actions secret values to be encrypted with the
-Org's libsodium **sealed-box** public key before upload. The provider:
+## Not in the first release
 
-1. Fetches the Org's public key via
-   `GET /orgs/{org}/actions/secrets/public-key` (cached for the
-   lifetime of the provider process).
-2. Encrypts `plaintext_value` with sealed-box (Curve25519 + XSalsa20 +
-   Poly1305) using the [`crypto_box`](https://crates.io/crates/crypto_box)
-   crate.
-3. Sends the base64-encoded ciphertext + `key_id` as the request body.
-
-`crypto_box` is chosen over `sodiumoxide` because it is pure Rust and
-builds cleanly for `wasm32-wasip2`. A spike compiled
-`crypto_box = "0.9"` with the `seal` feature against `wasm32-wasip2`
-without modification; no C toolchain is needed on the build host.
-
-The `plaintext_value` attribute is treated as **write-only**: it never
-appears in plan output diffs after the initial create, and Carina state
-records only a salted hash of the most recent successful upload (so
-plan can detect "the authored value changed since last apply" without
-storing the secret).
-
-## carina-core pin
-
-This repo follows the same `.carina-core-min-rev` + per-`Cargo.toml`
-`rev` pinning pattern as `carina-provider-aws` / `-awscc`, gated by
-`scripts/check-carina-pin.sh` (copied from awscc with the repo name
-swapped). The initial pin is the carina `main` head at bootstrap time:
-`3a1c51d397ffa1e7725d32ebbac99c2edae5d27d`.
-
-## Repo layout
-
-```
-carina-provider-github/
-├── Cargo.toml                     # workspace
-├── .carina-core-min-rev           # minimum required carina-core rev
-├── .gitmodules                    # carina-plugin-wit submodule pin
-├── carina-plugin-wit/             # submodule (shared WIT)
-├── carina-provider-github/        # provider crate (lib + bin)
-│   ├── Cargo.toml
-│   └── src/
-│       ├── main.rs                # WASI entrypoint
-│       ├── lib.rs                 # provider type + factory
-│       ├── provider/              # auth, http client, resources
-│       └── schemas/               # resource schemas (hand-written for v1)
-├── docs/
-│   └── design.md                  # this document
-├── scripts/
-│   └── check-carina-pin.sh        # pin guard, copied from awscc
-├── .github/workflows/
-│   ├── ci.yml                     # check / test / clippy / fmt / wasm-build
-│   └── release.yml                # per-platform tarballs + wasm artifact
-├── CLAUDE.md
-├── README.md
-└── LICENSE
-```
-
-No `cfn-schema-cache/`, no `carina-aws-types/`, no `carina-codegen-*/`
-crate — GitHub's API is small enough at this scope that hand-written
-schemas are cheaper than wiring up codegen.
-
-## CI
-
-The final `.github/workflows/ci.yml` (post resource-implementation PR)
-runs:
-
-| Job          | Command                                                |
-| ------------ | ------------------------------------------------------ |
-| `check`      | `cargo check`                                          |
-| `test`       | `cargo test`                                           |
-| `clippy`     | `cargo clippy -- -D warnings`                          |
-| `fmt`        | `cargo fmt --check`                                    |
-| `wasm-build` | `cargo build -p carina-provider-github --target wasm32-wasip2 --release` then `vela optimize` and upload-artifact |
-| `carina-pin` | `./scripts/check-carina-pin.sh`                        |
-
-In this scaffold PR only `check` / `test` / `clippy` / `fmt` are
-enabled. `wasm-build` and `carina-pin` are added by the
-resource-implementation PR once the carina-core git deps are wired in
-— `carina-pin` would otherwise hard-fail on the empty dependency list,
-and a no-dependency stub for `wasm32-wasip2` is not informative.
-
-No `docs-drift` or `codegen-check` jobs yet — those exist in
-`-aws`/`-awscc` because of schema-driven codegen we are not adopting.
-
-## Release
-
-`.github/workflows/release.yml` mirrors the awscc release matrix:
-`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`,
-`aarch64-unknown-linux-gnu`, plus a `wasm32-wasip2` artifact post-`vela`.
-Triggered on `v*` tag push.
-
-## Open questions
-
-These are flagged here rather than deferred silently — each one needs a
-decision before the resource-implementation PR is opened, but none
-block the scaffold landing.
-
-1. **Plaintext-value drift detection.** Hashing the authored value and
-   storing the hash in state is the leading candidate (matches
-   established Terraform-ecosystem precedent). Outstanding sub-question:
-   what hash + salt scheme? `sha256(name || ":" || plaintext)` with a
-   per-state salt is one option. Decided in the resource PR.
-2. **`visibility = selected` repository ID validation.** Plan-time
-   validation would require either a read of the Org's repos or trust
-   in user-supplied IDs. Initial position: trust user input, surface
-   GitHub's 4xx response on apply. Revisited if it turns out to be a
-   common footgun.
-3. **App installation-token caching across `plan` → `apply`.** Each
-   `carina` subcommand invocation is a fresh provider process, so the
-   token is minted once per command. No cross-invocation cache for v1.
-
-## References
-
-- Issue: <https://github.com/carina-rs/carina/issues/3342>
-- Tracking issue: <https://github.com/carina-rs/registry/issues/5>
-- Design source: <https://github.com/carina-rs/registry/blob/main/docs/dogfooding-design.md>
-- Blocks: <https://github.com/carina-rs/infra/issues/94>
+- Organization-level OIDC templates, repository secrets/variables,
+  rulesets, environments, and any other GitHub resource.
+- `repo_property_*` claim keys and `use_immutable_subject`.
+- GitHub App authentication.
+- Following a repository rename. The identity is the `owner/repo` string.
+  GitHub redirects renamed repositories, but this provider does not
+  rewrite state to the new name.
