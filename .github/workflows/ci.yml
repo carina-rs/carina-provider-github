@@ -14,35 +14,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check
+      - run: cargo check --locked
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - run: cargo test --locked
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --locked --all-targets -- -D warnings
 
   fmt:
     name: Format
@@ -54,13 +48,29 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
-  # carina-pin and wasm-build are intentionally NOT in the scaffold PR.
-  # They are added by the resource-implementation PR (see
-  # docs/design.md) once the carina-core git deps are wired in:
-  #
-  #   - carina-pin: the check script expects at least one carina git
-  #     dep in Cargo.toml and would hard-fail on this PR's empty
-  #     dependency list.
-  #   - wasm-build: WASI/host bindings are introduced together with the
-  #     provider entrypoint in the resource PR; building a
-  #     no-dependency stub for wasm32-wasip2 is not informative.
+  wasm-build:
+    name: Build WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked -p carina-provider-github --target wasm32-wasip2 --release
+
+  carina-pin:
+    name: Check Carina pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-carina-pin.sh
+
+  sdk-bindings:
+    name: Check SDK bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: bash scripts/check-provider-sdk-bindings.sh
+      - run: bash scripts/test-check-provider-sdk-bindings.sh
