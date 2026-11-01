@@ -55,6 +55,11 @@ struct ApiFailure {
     uncertain: bool,
 }
 
+enum StatePresence {
+    InState,
+    NotInState,
+}
+
 impl From<ProviderError> for ApiFailure {
     fn from(error: ProviderError) -> Self {
         Self {
@@ -160,6 +165,7 @@ impl<A: GithubApi> GithubProvider<A> {
         method: Method,
         repository: &str,
         keys: Option<&[String]>,
+        state_presence: StatePresence,
     ) -> Result<Response<Vec<u8>>, ApiFailure> {
         validate_repository(repository)?;
         let token = self.token.as_ref().ok_or_else(|| error(ProviderErrorKind::InvalidInput, "GitHub provider configuration: initialize with a non-empty GITHUB_TOKEN before making requests"))?;
@@ -220,7 +226,7 @@ impl<A: GithubApi> GithubProvider<A> {
         }
 
         let parsed: Option<serde_json::Value> = serde_json::from_slice(response.body()).ok();
-        let message = match parsed
+        let mut message = match parsed
             .as_ref()
             .and_then(|body| body.get("message"))
             .and_then(serde_json::Value::as_str)
@@ -235,7 +241,22 @@ impl<A: GithubApi> GithubProvider<A> {
             ),
         };
         let kind = match status.as_u16() {
-            404 => ProviderErrorKind::NotFound,
+            404 => {
+                // The CLI converts NotFound errors to absent state, but GitHub's
+                // 404 also covers missing repository access or request permissions.
+                if !message.ends_with(['.', '!', '?']) {
+                    message.push('.');
+                }
+                // ponytail: Non-repository endpoints need their own 404 wording.
+                message.push_str(" The repository was not found, or the token cannot access it.");
+                if matches!(state_presence, StatePresence::InState) {
+                    message.push_str(
+                        " If the repository really was deleted, remove this resource from state with a \
+                         `removed { from = ... }` block.",
+                    );
+                }
+                ProviderErrorKind::ApiError
+            }
             400 | 422 => ProviderErrorKind::InvalidInput,
             408 | 504 => ProviderErrorKind::Timeout,
             _ => ProviderErrorKind::ApiError,
@@ -262,13 +283,14 @@ impl<A: GithubApi> GithubProvider<A> {
         id: &ResourceId,
         identifier: &AppliedIdentifier,
     ) -> Result<ReadOutcome, ProviderError> {
-        let response = match self.request(Method::GET, identifier.as_str(), None) {
-            Ok(response) => response,
-            Err(failure) if failure.error.kind == ProviderErrorKind::NotFound => {
-                return Ok(ReadOutcome::NotFound { id: id.clone() });
-            }
-            Err(failure) => return Err(failure.error),
-        };
+        let response = self
+            .request(
+                Method::GET,
+                identifier.as_str(),
+                None,
+                StatePresence::InState,
+            )
+            .map_err(|failure| failure.error)?;
         let subject: OidcSubject = serde_json::from_slice(response.body()).map_err(|_| {
             error(
                 ProviderErrorKind::ApiError,
@@ -413,7 +435,12 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
             Ok(desired) => desired,
             Err(error) => return Err(attempt.untracked(error)),
         };
-        match self.request(Method::PUT, identifier.as_str(), keys.as_deref()) {
+        match self.request(
+            Method::PUT,
+            identifier.as_str(),
+            keys.as_deref(),
+            StatePresence::NotInState,
+        ) {
             Ok(_) => {
                 let attributes = attributes(identifier.as_str(), keys);
                 Ok(attempt
@@ -503,8 +530,13 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
                 })?;
                 Some(claim_keys(&value)?)
             };
-            self.request(Method::PUT, identifier.as_str(), keys.as_deref())
-                .map_err(|failure| failure.error)?;
+            self.request(
+                Method::PUT,
+                identifier.as_str(),
+                keys.as_deref(),
+                StatePresence::InState,
+            )
+            .map_err(|failure| failure.error)?;
             state
                 .attributes
                 .insert("use_default".into(), Value::Bool(use_default).into());
@@ -548,13 +580,14 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
         identifier: &AppliedIdentifier,
         _request: DeleteRequest,
     ) -> Result<DeleteOutcome<Never>, ProviderError> {
-        match self.request(Method::PUT, identifier.as_str(), None) {
-            Ok(_) => Ok(DeleteOutcome::Deleted),
-            Err(failure) if failure.error.kind == ProviderErrorKind::NotFound => {
-                Ok(DeleteOutcome::Deleted)
-            }
-            Err(failure) => Err(failure.error),
-        }
+        self.request(
+            Method::PUT,
+            identifier.as_str(),
+            None,
+            StatePresence::InState,
+        )
+        .map_err(|failure| failure.error)?;
+        Ok(DeleteOutcome::Deleted)
     }
 
     fn poll_delete(
