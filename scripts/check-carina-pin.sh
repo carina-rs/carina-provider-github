@@ -1,8 +1,9 @@
 #!/bin/bash
 # Guard against a stale / inconsistent carina-core git pin.
 #
-# Provider repos pin carina-core (+ carina-plugin-sdk +
-# carina-provider-protocol) by git `rev` in their Cargo.toml files.
+# Provider repos pin carina-plugin-sdk (and any other directly used carina
+# crates) by git `rev` in their Cargo.toml files. One workspace SDK pin is
+# sufficient: inherited dependencies need no separate pin.
 # Two recurring failure modes this catches:
 #
 #   1. INCONSISTENT pin — different revs across the workspace's
@@ -76,10 +77,10 @@ fi
 MIN_REV="$(tr -d '[:space:]' < "$MIN_REV_FILE")"
 [ -n "$MIN_REV" ] || fail "$MIN_REV_FILE is empty"
 
-# Ancestry check needs a carina clone. CI clones it; locally we use an
-# adjacent ../carina checkout if present, else a temp shallow-ish clone.
+# Ancestry check needs a carina clone. CARINA_CORE_DIR selects a local
+# checkout. Existing objects are checked without writing to that checkout.
 CARINA_DIR=""
-if [ -n "${CARINA_CORE_DIR:-}" ] && [ -d "${CARINA_CORE_DIR}/.git" ]; then
+if [ -n "${CARINA_CORE_DIR:-}" ] && git -C "$CARINA_CORE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
     CARINA_DIR="$CARINA_CORE_DIR"
 elif [ -d "../carina/.git" ]; then
     CARINA_DIR="$(cd ../carina && pwd)"
@@ -89,10 +90,11 @@ else
     git clone --quiet --filter=blob:none "$CARINA_GIT" "$CARINA_DIR"
 fi
 
-git -C "$CARINA_DIR" fetch --quiet origin "$MIN_REV" "$PINNED_REV" 2>/dev/null || \
-    git -C "$CARINA_DIR" fetch --quiet origin 2>/dev/null || true
-
 for r in "$MIN_REV" "$PINNED_REV"; do
+    if ! git -C "$CARINA_DIR" cat-file -e "${r}^{commit}" 2>/dev/null; then
+        git -C "$CARINA_DIR" fetch --quiet origin "$r" 2>/dev/null || \
+            git -C "$CARINA_DIR" fetch --quiet origin 2>/dev/null || true
+    fi
     git -C "$CARINA_DIR" cat-file -e "${r}^{commit}" 2>/dev/null || \
         fail "carina rev ${r} not found in ${CARINA_GIT} (bad rev in pin or $MIN_REV_FILE)"
 done

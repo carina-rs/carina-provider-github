@@ -38,13 +38,29 @@ It wraps the REST endpoints
 | ------------ | --------------------------------------- | ----- |
 | `repository` | string, `owner/repo`                    | Required, create-only, identity. |
 | `claim_keys` | ordered list of `ClaimKey`, length ≥ 1, unique | Optional. Omitted means GitHub's default subject. |
+| `use_default` | bool | Provider-populated; cannot be written. Derived from `claim_keys`. |
 
-There is no `mode` attribute. Whether the repository uses the default is
-expressed by whether `claim_keys` is present, so "custom mode with no
-keys" and "default mode with keys" cannot be written.
+There is no `mode` attribute users write. Whether the repository uses the
+default is expressed by whether `claim_keys` is present, so "custom mode
+with no keys" and "default mode with keys" cannot be written.
 
-`repository` is matched against `^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$` by a
-refined string, so a malformed value is rejected by `carina validate`.
+`use_default` exists so that drift away from the default is detected.
+The carina differ compares only attributes present in desired state, plus
+attributes the user authored in an earlier apply. If omitting
+`claim_keys` left nothing in desired state, a later hand edit to a custom
+subject would never show up in a plan. So `normalize_desired` fills in
+`use_default`: `true` when `claim_keys` is absent, `false` when it is set
+(or not yet known). Read maps GitHub's `use_default` to the same
+attribute, and the differ compares the two. Because the attribute is
+provider-populated, `carina validate` rejects a configuration that writes
+it.
+
+`repository` is an `owner/repo` string: the owner is letters, digits and
+`-`, and the repository name is letters, digits, `.`, `_` and `-`, but
+not `.` or `..` (GitHub forbids those names, and they would change the
+request path). A refined string's pattern checks this, so a malformed
+value is rejected by `carina validate`. The provider checks the same rule
+again before it builds a request URL.
 
 `claim_keys` is ordered because GitHub builds the subject in list order
 (`repo:…:context:…:job_workflow_ref:…`). Reordering it changes the
@@ -83,14 +99,21 @@ provider release.
   when `claim_keys` is set, otherwise `PUT {"use_default": true}`. The
   setting always exists on a repository, so create is "set", not
   "insert"; the identifier is the `owner/repo` string.
-- **Read**: `GET`. `use_default: true` reads back as `claim_keys` absent.
-  `use_default: false` with keys reads back as those keys in order. A
-  repository that is not on the default but has no keys (it inherits an
-  org template, which this provider never writes) reads back as an empty
+- **Read**: `GET`. `use_default` is copied from GitHub. `use_default:
+  true` reads back as `claim_keys` absent. `use_default: false` with keys
+  reads back as those keys in order. A repository that is not on the
+  default but has no keys (it inherits an org template, which this
+  provider never writes) reads back as `use_default = false` and an empty
   list. The DSL cannot author an empty list, so plan shows a change and
-  apply rewrites it. A 404 for the repository reads as not found.
-- **Update**: the same `PUT` with the desired state. Removing
-  `claim_keys` resets to the default.
+  apply rewrites it whether `claim_keys` is written or omitted. A 404 for
+  the repository reads as not found.
+- **Update**: the same `PUT` with the desired state. `use_default` in
+  the state after the patch decides the request: when it is `true` the
+  provider resets to the default and drops any `claim_keys` the prior
+  state held. This matters because drift away from the default arrives as
+  a patch on `use_default` alone; the prior state's `claim_keys` are the
+  drifted value, not the desired one. Removing `claim_keys` resets to the
+  default.
 - **Delete**: `PUT {"use_default": true}`, which GitHub documents as the
   way to reset a repository to the default subject. A 404 for the
   repository counts as already deleted.
@@ -101,8 +124,17 @@ provider release.
 
 All operations are synchronous. Create/update/delete tokens are `Never`.
 A request that fails before it is transmitted, or with a definite 4xx, is
-reported as not applied. A timeout or 5xx after transmit keeps the attempt
-pending, so the next apply re-reads instead of assuming success.
+reported as not applied. When the outcome of a create is unknown (a
+transport failure after the request may have been sent, a 5xx, or a
+redirect, which is not followed), the provider records the resource as
+issued under its identifier but reports the create as failed. The
+identifier is the `owner/repo` string, known before anything is sent, so
+nothing about the attempt is lost. Only `repository` is recorded as sent;
+the unconfirmed `claim_keys` are not, so the next plan reads the setting
+back and shows whatever difference remains. `Never` tokens cannot carry a
+continuation, and none is needed: the `PUT` is idempotent, so applying it
+again is safe. An update or delete whose outcome is unknown returns an
+error and leaves state as it was, and the next plan refreshes it.
 
 `use_immutable_subject` and `sub_claim_prefix` are not managed. Requests
 never send `use_immutable_subject`, so this provider leaves it as is.
@@ -125,7 +157,9 @@ the acceptance run, not assumed.
 
 `export_provider!(GithubProvider, http, egress: ["api.github.com"])`. An
 exact host matches only that host. The host enforces the declaration per
-request, consent is recorded by `carina init` in `carina-providers.lock`,
+request, consent is recorded by `carina init` in `carina-providers.lock`
+(interactively, or with `--accept-egress <source>` when stdin is not a
+terminal),
 and private, loopback and metadata addresses are denied for the GitHub
 kind. HTTP goes through `carina_plugin_sdk::wasi_http::send_request`.
 
@@ -162,16 +196,25 @@ with `--trust-local-provider <path>=github`.
 - Schema tests: validation rejects a malformed `repository`, an empty
   `claim_keys` and a duplicate key; bare and qualified enum spellings are
   accepted.
-- A real-WASM acceptance test runs plan/apply/destroy against a repository
-  in the `carina-test` org only. carina-rs repositories are never used as
-  test targets.
+- Acceptance runs the built component with a real `carina` against
+  `carina-test/oidc-subject`, a private repository in the `carina-test`
+  org, and only there. carina-rs repositories are never used as test
+  targets. It is run by hand for now and is not in CI. The first run
+  covered: apply with `claim_keys` omitted, a hand edit to a custom
+  subject detected by plan and reset by apply, custom keys written with
+  the qualified enum spelling (no spurious diff), a hand reorder, the
+  org-template state, `prevent_destroy` stopping destroy, and a forced
+  destroy resetting to the default.
 
 ## CI and release
 
 CI runs `check`, `test`, `clippy -D warnings`, `fmt --check`, a
 `wasm32-wasip2` release build, the pin check and the bindings guard.
 
-Release uses `carina-rs/provider-release` (the reusable WASM build plus
+Release is not wired yet. The existing release workflow is from the
+scaffold: it builds native binaries, which are empty now that the crate
+is a WASM component, and publishes nothing. It must be replaced before the
+first tag. The plan: release uses `carina-rs/provider-release` (the reusable WASM build plus
 the `github-release`, `publish` and `yank` actions, pinned by SHA), as the
 AWS providers do. The first release goes to the dev registry. A formal
 release tag needs the user's approval.

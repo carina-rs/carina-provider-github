@@ -1,9 +1,8 @@
-// Scaffold entrypoint. The WASI/native provider entrypoint is wired up
-// in the follow-up resource PR (see docs/design.md).
+#[cfg(target_arch = "wasm32")]
+use carina_provider_github::GithubProvider;
 
-fn main() {
-    eprintln!(
-        "carina-provider-github: scaffold only — provider implementation lands in a follow-up PR. \
-         See docs/design.md."
-    );
-}
+#[cfg(target_arch = "wasm32")]
+carina_plugin_sdk::export_provider!(GithubProvider, http, egress: ["api.github.com"]);
+
+// The host calls the component exports. Native builds exist for tests.
+fn main() {}
