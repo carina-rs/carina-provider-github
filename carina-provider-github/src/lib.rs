@@ -11,9 +11,9 @@ use carina_plugin_sdk::core::schema::{
 };
 use carina_plugin_sdk::types::*;
 use carina_plugin_sdk::{
-    CarinaProvider, CreateAttempt, CreateStep, CreateVerdict, DeleteOutcome, DesiredAttribute,
-    DesiredResource, Never, NormalizedResource, Pending, PendingDelete, PlanOp, Poll, PollRequest,
-    PollVerdict, Resume, ResumeStep, ResumeVerdict, Sent, UpdateOutcome,
+    CarinaProvider, CreateAttempt, CreateStep, CreateVerdict, DeleteOutcome, DesiredResource,
+    DesiredScalar, DesiredValue, DesiredView, Never, NormalizedResource, Pending, PendingDelete,
+    PlanOp, Poll, PollRequest, PollVerdict, Resume, ResumeStep, ResumeVerdict, Sent, UpdateOutcome,
 };
 use http::{Method, Request, Response};
 use serde::Deserialize;
@@ -148,15 +148,17 @@ fn attributes(repository: &str, keys: Option<Vec<String>>) -> BTreeMap<String, V
     attributes
 }
 
-fn normalized_use_default(
-    resource_type: &str,
-    claim_keys: DesiredAttribute<&Value>,
-    use_default: DesiredAttribute<&Value>,
-) -> Option<Value> {
-    if resource_type != "actions.OidcSubject" || !matches!(use_default, DesiredAttribute::Absent) {
-        return None;
+fn normalized_use_default(view: &mut DesiredView<'_>) -> Result<(), ProviderError> {
+    if view.id().resource_type != "actions.OidcSubject" || view.attribute("use_default").is_some() {
+        return Ok(());
     }
-    Some(Value::Bool(matches!(claim_keys, DesiredAttribute::Absent)))
+    let value = DesiredValue::Known(DesiredScalar::Bool(view.attribute("claim_keys").is_none()));
+    view.insert_absent("use_default", value).map_err(|failure| {
+        error(
+            ProviderErrorKind::Internal,
+            format!("failed to normalize OIDC subject: {failure}"),
+        )
+    })
 }
 
 impl<A: GithubApi> GithubProvider<A> {
@@ -365,22 +367,10 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
     ) -> Result<Vec<NormalizedResource>, ProviderError> {
         resources
             .into_iter()
-            .map(|mut resource| {
-                if let Some(value) = normalized_use_default(
-                    &resource.id().resource_type,
-                    resource.attribute("claim_keys"),
-                    resource.attribute("use_default"),
-                ) {
-                    resource
-                        .insert_absent("use_default", value)
-                        .map_err(|failure| {
-                            error(
-                                ProviderErrorKind::Internal,
-                                format!("failed to normalize OIDC subject: {failure}"),
-                            )
-                        })?;
-                }
-                Ok(resource.finish())
+            .map(|resource| {
+                let mut desired = resource.into_normalization()?;
+                normalized_use_default(&mut desired.view())?;
+                Ok(desired.finish()?)
             })
             .collect()
     }

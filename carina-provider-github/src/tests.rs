@@ -1,11 +1,13 @@
 use super::*;
 use crate::api::{GithubApi, GithubToken, TransportError};
-use carina_plugin_sdk::core::resource::{ConcreteValue, Value as CoreValue};
+use carina_plugin_sdk::core::resource::{
+    ConcreteValue, DeferredValue, Resource as CoreResource, Value as CoreValue,
+};
 use carina_plugin_sdk::core::schema::{IdentityMode, SchemaKind, SchemaRegistry, TypeError};
 use carina_plugin_sdk::protocol::types::{
     CreateStep as WireCreateStep, CreateVerdict as WireCreateVerdict,
 };
-use carina_plugin_sdk::{DesiredAttribute, ProviderSchemaCache, dispatch_create};
+use carina_plugin_sdk::{NativeDesiredNormalization, ProviderSchemaCache, dispatch_create};
 use http::{Request, Response};
 use serde_json::json;
 use std::cell::RefCell;
@@ -124,66 +126,89 @@ fn assert_body(provider: &GithubProvider<FakeApi>, index: usize, expected: serde
     );
 }
 
-// The SDK exposes no native constructor for DesiredResource. Exercise the
-// insertion decision used by normalize_desired with its three-way attribute API.
+// Exercise the shared DesiredView normalizer with real opaque deferred leaves
+// through the native adapter; DesiredResource is constructed at the guest boundary.
+fn normalize_desired_resource(
+    resource_type: &str,
+    claim_keys: Option<CoreValue>,
+    use_default: Option<CoreValue>,
+) -> CoreResource {
+    let mut resource = CoreResource::with_provider("github", resource_type, "subject", None);
+    if let Some(claim_keys) = claim_keys {
+        resource = resource.with_attribute("claim_keys", claim_keys);
+    }
+    if let Some(use_default) = use_default {
+        resource = resource.with_attribute("use_default", use_default);
+    }
+    let mut desired = NativeDesiredNormalization::from_core(&mut resource).unwrap();
+    normalized_use_default(&mut desired.view()).unwrap();
+    desired.finish().unwrap();
+    resource
+}
+
 #[test]
 fn normalize_desired_inserts_use_default_for_absent_known_and_deferred_keys() {
-    let known = keys(&["repo"]);
+    let known = CoreValue::Concrete(ConcreteValue::List(vec![CoreValue::Concrete(
+        ConcreteValue::String("repo".into()),
+    )]));
     for (claim_keys, expected) in [
-        (DesiredAttribute::Absent, true),
-        (DesiredAttribute::Known(&known), false),
-        (DesiredAttribute::Deferred, false),
+        (None, true),
+        (Some(known.clone()), false),
+        (
+            Some(CoreValue::Deferred(DeferredValue::Secret(Box::new(known)))),
+            false,
+        ),
     ] {
+        let expected_keys = claim_keys.clone();
+        let resource = normalize_desired_resource("actions.OidcSubject", claim_keys, None);
         assert_eq!(
-            normalized_use_default("actions.OidcSubject", claim_keys, DesiredAttribute::Absent,),
-            Some(Value::Bool(expected)),
+            resource.attributes["use_default"],
+            CoreValue::Concrete(ConcreteValue::Bool(expected)),
+        );
+        assert_eq!(
+            resource.attributes.get("claim_keys"),
+            expected_keys.as_ref()
         );
     }
 }
 
 #[test]
 fn normalize_desired_keeps_existing_use_default() {
-    let known = keys(&["repo"]);
-    for existing in [Value::Bool(true), Value::Bool(false)] {
+    let known = CoreValue::Concrete(ConcreteValue::List(vec![CoreValue::Concrete(
+        ConcreteValue::String("repo".into()),
+    )]));
+    for existing in [true, false] {
         for claim_keys in [
-            DesiredAttribute::Absent,
-            DesiredAttribute::Known(&known),
-            DesiredAttribute::Deferred,
+            None,
+            Some(known.clone()),
+            Some(CoreValue::Deferred(DeferredValue::Secret(Box::new(
+                known.clone(),
+            )))),
         ] {
-            assert_eq!(
-                normalized_use_default(
-                    "actions.OidcSubject",
-                    claim_keys,
-                    DesiredAttribute::Known(&existing),
-                ),
-                None,
+            let existing = CoreValue::Concrete(ConcreteValue::Bool(existing));
+            let resource = normalize_desired_resource(
+                "actions.OidcSubject",
+                claim_keys,
+                Some(existing.clone()),
             );
+            assert_eq!(resource.attributes["use_default"], existing);
         }
     }
 }
 
 #[test]
 fn normalize_desired_preserves_deferred_use_default() {
-    assert_eq!(
-        normalized_use_default(
-            "actions.OidcSubject",
-            DesiredAttribute::Absent,
-            DesiredAttribute::Deferred,
-        ),
-        None,
-    );
+    let existing = CoreValue::Deferred(DeferredValue::Secret(Box::new(CoreValue::Concrete(
+        ConcreteValue::Bool(true),
+    ))));
+    let resource = normalize_desired_resource("actions.OidcSubject", None, Some(existing.clone()));
+    assert_eq!(resource.attributes["use_default"], existing);
 }
 
 #[test]
 fn normalize_desired_leaves_other_resource_types_untouched() {
-    assert_eq!(
-        normalized_use_default(
-            "actions.Other",
-            DesiredAttribute::Absent,
-            DesiredAttribute::Absent,
-        ),
-        None,
-    );
+    let resource = normalize_desired_resource("actions.Other", None, None);
+    assert!(resource.attributes.is_empty());
 }
 
 #[test]
