@@ -105,8 +105,8 @@ provider release.
   default but has no keys (it inherits an org template, which this
   provider never writes) reads back as `use_default = false` and an empty
   list. The DSL cannot author an empty list, so plan shows a change and
-  apply rewrites it whether `claim_keys` is written or omitted. A 404 for
-  the repository reads as not found.
+  apply rewrites it whether `claim_keys` is written or omitted. A 404 is
+  an error, not absence (see below).
 - **Update**: the same `PUT` with the desired state. `use_default` in
   the state after the patch decides the request: when it is `true` the
   provider resets to the default and drops any `claim_keys` the prior
@@ -115,8 +115,8 @@ provider release.
   drifted value, not the desired one. Removing `claim_keys` resets to the
   default.
 - **Delete**: `PUT {"use_default": true}`, which GitHub documents as the
-  way to reset a repository to the default subject. A 404 for the
-  repository counts as already deleted.
+  way to reset a repository to the default subject. A 404 is an error,
+  not absence (see below).
 - **Default `prevent_destroy`** (carina#4150) is declared on the type from
   the start, because deleting it changes the subject every downstream
   trust policy matches on. Users opt out with
@@ -135,6 +135,20 @@ back and shows whatever difference remains. `Never` tokens cannot carry a
 continuation, and none is needed: the `PUT` is idempotent, so applying it
 again is safe. An update or delete whose outcome is unknown returns an
 error and leaves state as it was, and the next plan refreshes it.
+
+Every HTTP 404 is an `ApiError` explaining: "The repository was not found,
+or the token cannot access it." The request layer requires each caller
+to say whether the resource is recorded in state. Reads, updates and
+deletes append: "If the repository really was deleted, remove this
+resource from state with a `removed { from = ... }` block." Create's
+initial `PUT` targets a resource not yet in state and omits that guidance.
+
+A 404 during read-back after an uncertain create is a tracked
+`Observation::ReadFailed` with `ApiError`; the issued identifier is kept.
+Later plans error until the user restores repository access or removes
+the resource from state. Carina does not refresh rows targeted by a
+`removed` block, so removal works even when the read fails
+([carina#4215](https://github.com/carina-rs/carina/issues/4215)).
 
 `use_immutable_subject` and `sub_claim_prefix` are not managed. Requests
 never send `use_immutable_subject`, so this provider leaves it as is.
@@ -191,8 +205,9 @@ with `--trust-local-provider <path>=github`.
 ## Testing
 
 - Unit tests through the fake API: create/read/update/delete, default
-  versus custom read-back, the org-template read-back, 404 handling, and
-  that requests never carry `use_immutable_subject`.
+  versus custom read-back, the org-template read-back, exact 404 messages
+  with `removed` block guidance only for resources in state, and that
+  requests never carry `use_immutable_subject`.
 - Schema tests: validation rejects a malformed `repository`, an empty
   `claim_keys` and a duplicate key; bare and qualified enum spellings are
   accepted.

@@ -1,11 +1,13 @@
 use super::*;
 use crate::api::{GithubApi, GithubToken, TransportError};
-use carina_plugin_sdk::core::resource::{ConcreteValue, Value as CoreValue};
+use carina_plugin_sdk::core::resource::{
+    ConcreteValue, DeferredValue, Resource as CoreResource, Value as CoreValue,
+};
 use carina_plugin_sdk::core::schema::{IdentityMode, SchemaKind, SchemaRegistry, TypeError};
 use carina_plugin_sdk::protocol::types::{
     CreateStep as WireCreateStep, CreateVerdict as WireCreateVerdict,
 };
-use carina_plugin_sdk::{DesiredAttribute, ProviderSchemaCache, dispatch_create};
+use carina_plugin_sdk::{NativeDesiredNormalization, ProviderSchemaCache, dispatch_create};
 use http::{Request, Response};
 use serde_json::json;
 use std::cell::RefCell;
@@ -124,66 +126,89 @@ fn assert_body(provider: &GithubProvider<FakeApi>, index: usize, expected: serde
     );
 }
 
-// The SDK exposes no native constructor for DesiredResource. Exercise the
-// insertion decision used by normalize_desired with its three-way attribute API.
+// Exercise the shared DesiredView normalizer with real opaque deferred leaves
+// through the native adapter; DesiredResource is constructed at the guest boundary.
+fn normalize_desired_resource(
+    resource_type: &str,
+    claim_keys: Option<CoreValue>,
+    use_default: Option<CoreValue>,
+) -> CoreResource {
+    let mut resource = CoreResource::with_provider("github", resource_type, "subject", None);
+    if let Some(claim_keys) = claim_keys {
+        resource = resource.with_attribute("claim_keys", claim_keys);
+    }
+    if let Some(use_default) = use_default {
+        resource = resource.with_attribute("use_default", use_default);
+    }
+    let mut desired = NativeDesiredNormalization::from_core(&mut resource).unwrap();
+    normalized_use_default(&mut desired.view()).unwrap();
+    desired.finish().unwrap();
+    resource
+}
+
 #[test]
 fn normalize_desired_inserts_use_default_for_absent_known_and_deferred_keys() {
-    let known = keys(&["repo"]);
+    let known = CoreValue::Concrete(ConcreteValue::List(vec![CoreValue::Concrete(
+        ConcreteValue::String("repo".into()),
+    )]));
     for (claim_keys, expected) in [
-        (DesiredAttribute::Absent, true),
-        (DesiredAttribute::Known(&known), false),
-        (DesiredAttribute::Deferred, false),
+        (None, true),
+        (Some(known.clone()), false),
+        (
+            Some(CoreValue::Deferred(DeferredValue::Secret(Box::new(known)))),
+            false,
+        ),
     ] {
+        let expected_keys = claim_keys.clone();
+        let resource = normalize_desired_resource("actions.OidcSubject", claim_keys, None);
         assert_eq!(
-            normalized_use_default("actions.OidcSubject", claim_keys, DesiredAttribute::Absent,),
-            Some(Value::Bool(expected)),
+            resource.attributes["use_default"],
+            CoreValue::Concrete(ConcreteValue::Bool(expected)),
+        );
+        assert_eq!(
+            resource.attributes.get("claim_keys"),
+            expected_keys.as_ref()
         );
     }
 }
 
 #[test]
 fn normalize_desired_keeps_existing_use_default() {
-    let known = keys(&["repo"]);
-    for existing in [Value::Bool(true), Value::Bool(false)] {
+    let known = CoreValue::Concrete(ConcreteValue::List(vec![CoreValue::Concrete(
+        ConcreteValue::String("repo".into()),
+    )]));
+    for existing in [true, false] {
         for claim_keys in [
-            DesiredAttribute::Absent,
-            DesiredAttribute::Known(&known),
-            DesiredAttribute::Deferred,
+            None,
+            Some(known.clone()),
+            Some(CoreValue::Deferred(DeferredValue::Secret(Box::new(
+                known.clone(),
+            )))),
         ] {
-            assert_eq!(
-                normalized_use_default(
-                    "actions.OidcSubject",
-                    claim_keys,
-                    DesiredAttribute::Known(&existing),
-                ),
-                None,
+            let existing = CoreValue::Concrete(ConcreteValue::Bool(existing));
+            let resource = normalize_desired_resource(
+                "actions.OidcSubject",
+                claim_keys,
+                Some(existing.clone()),
             );
+            assert_eq!(resource.attributes["use_default"], existing);
         }
     }
 }
 
 #[test]
 fn normalize_desired_preserves_deferred_use_default() {
-    assert_eq!(
-        normalized_use_default(
-            "actions.OidcSubject",
-            DesiredAttribute::Absent,
-            DesiredAttribute::Deferred,
-        ),
-        None,
-    );
+    let existing = CoreValue::Deferred(DeferredValue::Secret(Box::new(CoreValue::Concrete(
+        ConcreteValue::Bool(true),
+    ))));
+    let resource = normalize_desired_resource("actions.OidcSubject", None, Some(existing.clone()));
+    assert_eq!(resource.attributes["use_default"], existing);
 }
 
 #[test]
 fn normalize_desired_leaves_other_resource_types_untouched() {
-    assert_eq!(
-        normalized_use_default(
-            "actions.Other",
-            DesiredAttribute::Absent,
-            DesiredAttribute::Absent,
-        ),
-        None,
-    );
+    let resource = normalize_desired_resource("actions.Other", None, None);
+    assert!(resource.attributes.is_empty());
 }
 
 #[test]
@@ -328,11 +353,53 @@ fn read_org_template_returns_empty_keys() {
 }
 
 #[test]
-fn read_404_is_not_found() {
-    let provider = provider([response(404, json!({"message": "Not Found"}))]);
-    assert!(
-        matches!(provider.read(&id(), &identifier(), ReadRequest).unwrap(), ReadOutcome::NotFound { id: actual } if actual == id())
-    );
+fn read_404_is_an_error() {
+    for (body, expected_message) in [
+        (
+            json!({"message": "Not Found"}),
+            "GitHub API returned HTTP 404 Not Found: Not Found. \
+             The repository was not found, or the token cannot access it. \
+             If the repository really was deleted, remove this resource from state with a \
+             `removed { from = ... }` block.",
+        ),
+        (
+            json!({}),
+            "GitHub API returned HTTP 404 Not Found with no error message in the body (2 bytes). \
+             The repository was not found, or the token cannot access it. \
+             If the repository really was deleted, remove this resource from state with a \
+             `removed { from = ... }` block.",
+        ),
+        (
+            json!({"message": "Not Found."}),
+            "GitHub API returned HTTP 404 Not Found: Not Found. \
+             The repository was not found, or the token cannot access it. \
+             If the repository really was deleted, remove this resource from state with a \
+             `removed { from = ... }` block.",
+        ),
+        (
+            json!({"message": "Not Found!"}),
+            "GitHub API returned HTTP 404 Not Found: Not Found! \
+             The repository was not found, or the token cannot access it. \
+             If the repository really was deleted, remove this resource from state with a \
+             `removed { from = ... }` block.",
+        ),
+        (
+            json!({"message": "Not Found?"}),
+            "GitHub API returned HTTP 404 Not Found: Not Found? \
+             The repository was not found, or the token cannot access it. \
+             If the repository really was deleted, remove this resource from state with a \
+             `removed { from = ... }` block.",
+        ),
+    ] {
+        let provider = provider([response(404, body)]);
+        let error = provider
+            .read(&id(), &identifier(), ReadRequest)
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ApiError);
+        assert_eq!(error.status, Some(404));
+        assert_eq!(error.operation.as_deref(), Some("actions.OidcSubject.GET"));
+        assert_eq!(error.message, expected_message);
+    }
 }
 
 #[test]
@@ -588,8 +655,13 @@ fn update_empty_patch_does_not_send_request() {
 fn update_failures_return_error_without_retry_or_read_back() {
     for failure in [
         response(500, json!({"message": "Internal Server Error"})),
+        response(404, json!({"message": "Not Found"})),
         Err(TransportError::MaybeSent),
     ] {
+        let expected_status = failure
+            .as_ref()
+            .ok()
+            .map(|response| response.status().as_u16());
         let provider = provider([failure]);
         let error = provider
             .update(
@@ -602,6 +674,16 @@ fn update_failures_return_error_without_retry_or_read_back() {
             )
             .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::ApiError);
+        assert_eq!(error.status, expected_status);
+        if expected_status == Some(404) {
+            assert_eq!(
+                error.message,
+                "GitHub API returned HTTP 404 Not Found: Not Found. \
+                 The repository was not found, or the token cannot access it. \
+                 If the repository really was deleted, remove this resource from state with a \
+                 `removed { from = ... }` block."
+            );
+        }
         assert_eq!(provider.api.requests.borrow().len(), 1);
         assert_body(
             &provider,
@@ -622,13 +704,33 @@ fn delete_resets_to_default() {
 }
 
 #[test]
-fn delete_404_is_already_deleted() {
-    let provider = provider([response(404, json!({"message": "Not Found"}))]);
-    assert!(matches!(
-        provider.delete(&id(), &identifier(), DeleteRequest::default()),
-        Ok(DeleteOutcome::Deleted)
-    ));
-    assert_body(&provider, 0, json!({"use_default": true}));
+fn delete_404_is_an_error() {
+    for (body, expected_message) in [
+        (
+            json!({"message": "Not Found"}),
+            "GitHub API returned HTTP 404 Not Found: Not Found. \
+             The repository was not found, or the token cannot access it. \
+             If the repository really was deleted, remove this resource from state with a \
+             `removed { from = ... }` block.",
+        ),
+        (
+            json!({}),
+            "GitHub API returned HTTP 404 Not Found with no error message in the body (2 bytes). \
+             The repository was not found, or the token cannot access it. \
+             If the repository really was deleted, remove this resource from state with a \
+             `removed { from = ... }` block.",
+        ),
+    ] {
+        let provider = provider([response(404, body)]);
+        let error = provider
+            .delete(&id(), &identifier(), DeleteRequest::default())
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ApiError);
+        assert_eq!(error.status, Some(404));
+        assert_eq!(error.operation.as_deref(), Some("actions.OidcSubject.PUT"));
+        assert_eq!(error.message, expected_message);
+        assert_body(&provider, 0, json!({"use_default": true}));
+    }
 }
 
 #[test]
@@ -663,14 +765,39 @@ fn definite_4xx_create_failures_are_untracked_with_github_message() {
         assert!(error.message.contains("GitHub rejected this request"));
         assert_eq!(
             error.kind,
-            if status == 404 {
-                ProviderErrorKind::NotFound
-            } else if status == 400 || status == 422 {
+            if status == 400 || status == 422 {
                 ProviderErrorKind::InvalidInput
             } else {
                 ProviderErrorKind::ApiError
             }
         );
+        assert_eq!(provider.api.requests.borrow().len(), 1);
+    }
+}
+
+#[test]
+fn untracked_create_404_message_is_exact() {
+    for (body, expected_message) in [
+        (
+            json!({"message": "Not Found"}),
+            "GitHub API returned HTTP 404 Not Found: Not Found. \
+             The repository was not found, or the token cannot access it.",
+        ),
+        (
+            json!({}),
+            "GitHub API returned HTTP 404 Not Found with no error message in the body (2 bytes). \
+             The repository was not found, or the token cannot access it.",
+        ),
+    ] {
+        let provider = provider([response(404, body)]);
+        let verdict = dispatch_create(&provider, &id(), create_request(None)).unwrap_err();
+        let WireCreateVerdict::Untracked(error) = *verdict else {
+            panic!("expected untracked");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::ApiError);
+        assert_eq!(error.status, Some(404));
+        assert_eq!(error.operation.as_deref(), Some("actions.OidcSubject.PUT"));
+        assert_eq!(error.message, expected_message);
         assert_eq!(provider.api.requests.borrow().len(), 1);
     }
 }
@@ -716,11 +843,11 @@ fn uncertain_create_preserves_identifier_and_observed_state() {
 }
 
 #[test]
-fn uncertain_create_keeps_identifier_when_read_back_fails_or_is_missing() {
-    for read_back in [
-        Err(TransportError::MaybeSent),
-        response(502, json!({"message": "Bad Gateway"})),
-        response(404, json!({"message": "Not Found"})),
+fn uncertain_create_keeps_identifier_when_read_back_fails() {
+    for (read_back, expected_status) in [
+        (Err(TransportError::MaybeSent), None),
+        (response(502, json!({"message": "Bad Gateway"})), Some(502)),
+        (response(404, json!({"message": "Not Found"})), Some(404)),
     ] {
         let provider = provider([Err(TransportError::MaybeSent), read_back]);
         let verdict = dispatch_create(&provider, &id(), create_request(None)).unwrap_err();
@@ -729,10 +856,20 @@ fn uncertain_create_keeps_identifier_when_read_back_fails_or_is_missing() {
         };
         assert_eq!(failure.identifier.as_str(), REPOSITORY);
         assert_eq!(failure.sent, Sent::only(["repository"]));
-        assert!(matches!(
-            failure.observation,
-            Observation::ReadFailed(_) | Observation::Read(ReadOutcome::NotFound { .. })
-        ));
+        let Observation::ReadFailed(error) = failure.observation else {
+            panic!("expected read-back failure");
+        };
+        assert_eq!(error.status, expected_status);
+        if expected_status == Some(404) {
+            assert_eq!(error.kind, ProviderErrorKind::ApiError);
+            assert_eq!(
+                error.message,
+                "GitHub API returned HTTP 404 Not Found: Not Found. \
+                 The repository was not found, or the token cannot access it. \
+                 If the repository really was deleted, remove this resource from state with a \
+                 `removed { from = ... }` block."
+            );
+        }
     }
 }
 
@@ -762,7 +899,23 @@ fn token_is_redacted_in_debug_and_errors() {
     let token = GithubToken::new(TEST_TOKEN.into()).unwrap();
     assert!(!format!("{token:?}").contains(TEST_TOKEN));
     let request_id = "ABCD:0123:4567:89AB:CDEF";
-    for status in [401, 500] {
+    for (status, expected_message) in [
+        (
+            401,
+            "GitHub API returned HTTP 401 Unauthorized: rejected Bearer [REDACTED]",
+        ),
+        (
+            404,
+            "GitHub API returned HTTP 404 Not Found: rejected Bearer [REDACTED]. \
+             The repository was not found, or the token cannot access it. \
+             If the repository really was deleted, remove this resource from state with a \
+             `removed { from = ... }` block.",
+        ),
+        (
+            500,
+            "GitHub API returned HTTP 500 Internal Server Error: rejected Bearer [REDACTED]",
+        ),
+    ] {
         let echoed = format!("rejected Bearer {TEST_TOKEN}");
         let response = Ok(Response::builder()
             .status(status)
@@ -774,9 +927,12 @@ fn token_is_redacted_in_debug_and_errors() {
         let error = provider
             .read(&id(), &identifier(), ReadRequest)
             .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::ApiError);
+        assert_eq!(error.status, Some(status));
+        assert_eq!(error.operation.as_deref(), Some("actions.OidcSubject.GET"));
         assert!(!format!("{error:?}").contains(TEST_TOKEN));
         assert!(!serde_json::to_string(&error).unwrap().contains(TEST_TOKEN));
-        assert!(error.message.contains("rejected Bearer [REDACTED]"));
+        assert_eq!(error.message, expected_message);
         assert_eq!(error.request_id.as_deref(), Some(request_id));
     }
     let body = format!("upstream error {TEST_TOKEN}").into_bytes();
@@ -807,7 +963,6 @@ fn large_html_error_body_is_not_included_in_message() {
     let error = provider
         .read(&id(), &identifier(), ReadRequest)
         .unwrap_err();
-    assert!(!error.message.contains("<html>"));
     assert_eq!(
         error.message,
         format!(
