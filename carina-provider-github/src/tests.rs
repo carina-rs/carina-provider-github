@@ -1,9 +1,12 @@
 use super::*;
 use crate::api::{GithubApi, GithubToken, TransportError};
+use carina_plugin_sdk::core::parser::ProviderCustomTypes;
 use carina_plugin_sdk::core::resource::{
     ConcreteValue, DeferredValue, Resource as CoreResource, Value as CoreValue,
 };
-use carina_plugin_sdk::core::schema::{IdentityMode, SchemaKind, SchemaRegistry, TypeError};
+use carina_plugin_sdk::core::schema::{
+    CompiledAttributeType, IdentityMode, SchemaKind, SchemaRegistry, TypeError, TypeInSchema,
+};
 use carina_plugin_sdk::protocol::types::{
     CreateStep as WireCreateStep, CreateVerdict as WireCreateVerdict,
 };
@@ -1150,11 +1153,31 @@ fn schema_repository_is_required_create_only_identity_and_refined() {
 #[test]
 fn schema_use_default_is_provider_populated_bool() {
     let provider = GithubProvider::<FakeApi>::default();
-    let schema = provider.schemas().remove(0);
-    let use_default = schema.effective_attribute("use_default").unwrap();
+    let cache = ProviderSchemaCache::from_provider(&provider).unwrap();
+    let mut registry = SchemaRegistry::new();
+    registry
+        .insert_provider_witness("github", cache.witness())
+        .unwrap();
+    let schema = registry
+        .get("github", "actions.OidcSubject", SchemaKind::Resource)
+        .unwrap();
+    let use_default = schema.schema().effective_attribute("use_default").unwrap();
     assert!(use_default.effective_input_mode().is_provider_populated());
     assert!(!use_default.is_create_only());
-    let cache = ProviderSchemaCache::from_provider(&provider).unwrap();
+    let catalog = ProviderCustomTypes::default();
+    let sink = schema.assignment_sink(use_default.field_type(), &catalog);
+    for (source, assignable) in [
+        (CompiledAttributeType::bool(), true),
+        (CompiledAttributeType::string(), false),
+    ] {
+        assert_eq!(
+            TypeInSchema::schemaless(&source)
+                .assignment_to(sink)
+                .require_loaded()
+                .unwrap(),
+            assignable
+        );
+    }
     let wire: serde_json::Value =
         serde_json::from_str(&carina_plugin_sdk::provider_schema_to_json(cache.witness()).unwrap())
             .unwrap();
@@ -1337,6 +1360,21 @@ fn schema_accepts_exact_design_claim_keys() {
     assert_eq!(name, "ClaimKey");
     assert_eq!(namespace.as_deref(), Some("github.actions.OidcSubject"));
     assert!(dsl_aliases.is_empty());
+}
+
+#[test]
+fn provider_assignability_edges_match_native_witness_and_wire_schema() {
+    let provider = GithubProvider::<HttpGithubApi>::default();
+    let edges = provider.assignability_edges();
+    assert!(edges.is_empty());
+
+    let cache = ProviderSchemaCache::from_provider(&provider).unwrap();
+    assert_eq!(cache.witness().assignability_edges(), edges.as_slice());
+
+    let wire: carina_plugin_sdk::protocol::types::ProviderSchemaEnvelope =
+        serde_json::from_str(&carina_plugin_sdk::provider_schema_to_json(cache.witness()).unwrap())
+            .unwrap();
+    assert!(wire.assignability_edges.is_empty());
 }
 
 #[test]

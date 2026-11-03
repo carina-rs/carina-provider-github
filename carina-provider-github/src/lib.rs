@@ -7,7 +7,7 @@ mod schema;
 
 use api::{GithubApi, GithubToken, HttpGithubApi, TransportError};
 use carina_plugin_sdk::core::schema::{
-    ReferenceForms, ValidatedConfigSchema, ValidatedResourceSchema,
+    AssignabilityEdge, ReferenceForms, ValidatedConfigSchema, ValidatedResourceSchema,
 };
 use carina_plugin_sdk::types::*;
 use carina_plugin_sdk::{
@@ -24,6 +24,11 @@ use std::fmt;
 /// Return the validated resource schemas exported by the GitHub provider.
 pub fn resource_schemas() -> Vec<ValidatedResourceSchema> {
     vec![schema::oidc_subject()]
+}
+
+/// Return the provider-wide directional identity edges exported by the GitHub provider.
+pub fn assignability_edges() -> Vec<AssignabilityEdge> {
+    Vec::new()
 }
 
 #[derive(Default)]
@@ -341,6 +346,10 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
 
     fn reference_forms(&self) -> ReferenceForms {
         ReferenceForms::new()
+    }
+
+    fn assignability_edges(&self) -> Vec<AssignabilityEdge> {
+        assignability_edges()
     }
 
     fn provider_config_attribute_types(&self) -> ValidatedConfigSchema {
