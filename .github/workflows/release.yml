@@ -4,100 +4,76 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --bin carina-provider-github
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-
-      - name: Package
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../carina-provider-github-${{ github.ref_name }}-${{ matrix.target }}.tar.gz carina-provider-github
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: carina-provider-github-${{ matrix.target }}
-          path: carina-provider-github-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-
-  build-wasm:
-    name: Build WASM
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip2
-
-      - name: Build
-        run: cargo build --release --target wasm32-wasip2 --bin carina-provider-github
-
-      - name: Optimize WASM with vela
-        run: |
-          cargo install --git https://github.com/mizzy/vela vela-cli --quiet
-          vela optimize target/wasm32-wasip2/release/carina-provider-github.wasm -o target/wasm32-wasip2/release/carina-provider-github.wasm
-
-      - name: Package
-        run: |
-          cp target/wasm32-wasip2/release/carina-provider-github.wasm carina-provider-github-${{ github.ref_name }}.wasm
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: carina-provider-github-wasm
-          path: carina-provider-github-${{ github.ref_name }}.wasm
+    name: Build
+    if: github.event_name == 'push'
+    uses: carina-rs/provider-release/.github/workflows/build.yml@355aa799082912dc4df5c3fff610502442104701
+    with:
+      provider: carina-provider-github
+      name: github
+      namespace: carina-rs
+      docs-generate: |
+        ./scripts/generate-docs.sh
+        docs_status=$(git status --porcelain -- generated-docs)
+        if ! git diff --exit-code || [ -n "$docs_status" ]; then
+          if [ -n "$docs_status" ]; then
+            printf '%s\n' "$docs_status"
+          fi
+          echo "::error::Committed docs do not match the exported provider schemas. Run './scripts/generate-docs.sh' locally and commit the regenerated generated-docs/."
+          exit 1
+        fi
 
   release:
     name: Create Release
-    needs: [build, build-wasm]
+    needs: [build]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: carina-rs/provider-release/github-release@355aa799082912dc4df5c3fff610502442104701
         with:
-          files: |
-            carina-provider-github-*.tar.gz
-            carina-provider-github-*.wasm
-          generate_release_notes: true
+          provider: carina-provider-github
+
+  publish:
+    name: Publish to Carina Registry
+    needs: [release]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - name: Publish to Carina Registry
+        # Signing/publish intentionally stay in this job so OIDC job_workflow_ref and the
+        # Fulcio SAN remain this release.yml (the registry's trusted-publisher policy points
+        # here); bump the SHA only after reviewing the provider-release diff.
+        uses: carina-rs/provider-release/publish@355aa799082912dc4df5c3fff610502442104701
+        with:
+          provider: carina-provider-github
+          name: github
+          namespace: carina-rs
+
+  yank:
+    name: Yank from Carina Registry
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - name: Yank from Carina Registry
+        uses: carina-rs/provider-release/yank@355aa799082912dc4df5c3fff610502442104701
+        with:
+          name: github
+          namespace: carina-rs

@@ -21,6 +21,11 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// Return the validated resource schemas exported by the GitHub provider.
+pub fn resource_schemas() -> Vec<ValidatedResourceSchema> {
+    vec![schema::oidc_subject()]
+}
+
 #[derive(Default)]
 pub struct GithubProvider<A = HttpGithubApi> {
     api: A,
@@ -331,7 +336,7 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
     }
 
     fn schemas(&self) -> Vec<ValidatedResourceSchema> {
-        vec![schema::oidc_subject()]
+        resource_schemas()
     }
 
     fn reference_forms(&self) -> ReferenceForms {
