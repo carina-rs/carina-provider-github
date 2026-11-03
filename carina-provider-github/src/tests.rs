@@ -274,8 +274,8 @@ fn create_rejects_empty_claim_keys_before_any_request() {
             .attributes
             .insert("claim_keys".into(), value);
         let verdict = dispatch_create(&provider, &id(), request).unwrap_err();
-        let WireCreateVerdict::Untracked(error) = *verdict else {
-            panic!("expected untracked");
+        let WireCreateVerdict::NotCreated(error) = *verdict else {
+            panic!("expected NotCreated");
         };
         assert_eq!(error.kind, ProviderErrorKind::InvalidInput);
         assert!(provider.api.requests.borrow().is_empty());
@@ -751,15 +751,15 @@ fn delete_failures_return_error() {
 }
 
 #[test]
-fn definite_4xx_create_failures_are_untracked_with_github_message() {
+fn definite_4xx_create_failures_are_not_created_with_github_message() {
     for status in [400, 401, 403, 404, 409, 422, 429] {
         let provider = provider([response(
             status,
             json!({"message": "GitHub rejected this request"}),
         )]);
         let verdict = dispatch_create(&provider, &id(), create_request(None)).unwrap_err();
-        let WireCreateVerdict::Untracked(error) = *verdict else {
-            panic!("expected untracked");
+        let WireCreateVerdict::NotCreated(error) = *verdict else {
+            panic!("expected NotCreated");
         };
         assert_eq!(error.status, Some(status));
         assert!(error.message.contains("GitHub rejected this request"));
@@ -776,7 +776,7 @@ fn definite_4xx_create_failures_are_untracked_with_github_message() {
 }
 
 #[test]
-fn untracked_create_404_message_is_exact() {
+fn not_created_create_404_message_is_exact() {
     for (body, expected_message) in [
         (
             json!({"message": "Not Found"}),
@@ -791,8 +791,8 @@ fn untracked_create_404_message_is_exact() {
     ] {
         let provider = provider([response(404, body)]);
         let verdict = dispatch_create(&provider, &id(), create_request(None)).unwrap_err();
-        let WireCreateVerdict::Untracked(error) = *verdict else {
-            panic!("expected untracked");
+        let WireCreateVerdict::NotCreated(error) = *verdict else {
+            panic!("expected NotCreated");
         };
         assert_eq!(error.kind, ProviderErrorKind::ApiError);
         assert_eq!(error.status, Some(404));
@@ -803,11 +803,11 @@ fn untracked_create_404_message_is_exact() {
 }
 
 #[test]
-fn pre_send_create_failure_is_untracked() {
+fn pre_send_create_failure_is_not_created() {
     let provider = provider([Err(TransportError::NotSent)]);
     assert!(matches!(
         *dispatch_create(&provider, &id(), create_request(None)).unwrap_err(),
-        WireCreateVerdict::Untracked(_)
+        WireCreateVerdict::NotCreated(_)
     ));
     assert_eq!(provider.api.requests.borrow().len(), 1);
 }
@@ -828,7 +828,7 @@ fn uncertain_create_preserves_identifier_and_observed_state() {
             .attributes
             .insert("use_default".into(), Value::Bool(false));
         let verdict = dispatch_create(&provider, &id(), request).unwrap_err();
-        let WireCreateVerdict::Created(failure) = *verdict else {
+        let WireCreateVerdict::IdentifierReported(failure) = *verdict else {
             panic!("uncertain create must retain its known identifier");
         };
         assert_eq!(failure.identifier.as_str(), REPOSITORY);
@@ -851,8 +851,8 @@ fn uncertain_create_keeps_identifier_when_read_back_fails() {
     ] {
         let provider = provider([Err(TransportError::MaybeSent), read_back]);
         let verdict = dispatch_create(&provider, &id(), create_request(None)).unwrap_err();
-        let WireCreateVerdict::Created(failure) = *verdict else {
-            panic!("expected tracked failure");
+        let WireCreateVerdict::IdentifierReported(failure) = *verdict else {
+            panic!("expected IdentifierReported");
         };
         assert_eq!(failure.identifier.as_str(), REPOSITORY);
         assert_eq!(failure.sent, Sent::only(["repository"]));
@@ -874,7 +874,7 @@ fn uncertain_create_keeps_identifier_when_read_back_fails() {
 }
 
 #[test]
-fn invalid_create_is_untracked_before_any_request() {
+fn invalid_create_is_not_created_before_any_request() {
     for (key, value) in [
         ("repository", Value::String(String::new())),
         ("repository", Value::String("owner/.".into())),
@@ -888,7 +888,7 @@ fn invalid_create_is_untracked_before_any_request() {
         request.resource.attributes.insert(key.into(), value);
         assert!(matches!(
             *dispatch_create(&provider, &id(), request).unwrap_err(),
-            WireCreateVerdict::Untracked(_)
+            WireCreateVerdict::NotCreated(_)
         ));
         assert!(provider.api.requests.borrow().is_empty());
     }

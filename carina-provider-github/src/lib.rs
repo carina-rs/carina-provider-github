@@ -265,7 +265,7 @@ impl<A: GithubApi> GithubProvider<A> {
         };
         Err(ApiFailure {
             // A redirect is deliberately not followed and also is not proof
-            // that the mutation was rejected. Only definite 4xx is untracked.
+            // that the mutation was rejected. Only definite 4xx yields NotCreated.
             uncertain: !status.is_client_error(),
             error: ProviderError {
                 operation: Some(operation),
@@ -423,7 +423,7 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
         };
         let (identifier, keys) = match desired() {
             Ok(desired) => desired,
-            Err(error) => return Err(attempt.untracked(error)),
+            Err(error) => return Err(attempt.not_created(error)),
         };
         match self.request(
             Method::PUT,
@@ -437,7 +437,7 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
                     .issued(identifier, Sent::AllRequestAttributes)
                     .succeeded(attributes))
             }
-            Err(failure) if !failure.uncertain => Err(attempt.untracked(failure.error)),
+            Err(failure) if !failure.uncertain => Err(attempt.not_created(failure.error)),
             Err(failure) => {
                 // PUT is idempotent and the setting's identifier is known
                 // before transmission. Never cannot carry a continuation, so
@@ -449,7 +449,7 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
                     Ok(outcome) => Observation::Read(outcome),
                     Err(error) => Observation::ReadFailed(error),
                 };
-                Err(issued.failed(observation, failure.error))
+                Err(issued.identifier_reported(observation, failure.error))
             }
         }
     }
