@@ -187,8 +187,13 @@ with `--trust-local-provider <path>=github`.
 
 ## Crate shape
 
-- One crate, `carina-provider-github`, built as `wasm32-wasip2` only.
-  There are no native release binaries and no `native` feature.
+- The provider crate, `carina-provider-github`, is built as
+  `wasm32-wasip2` only. There are no native release binaries and no
+  `native` feature. It is the workspace's only default member.
+- A second crate, `carina-provider-github-docgen`, is a native tool that
+  writes the registry documentation pages from the provider's exported
+  schemas (`resource_schemas()`) with `carina-docgen` from
+  carina-rs/carina-provider-aws. The provider does not depend on it.
 - Dependencies: `carina-plugin-sdk` pinned by exact `rev` (the SDK
   re-exports `carina-core` and `carina-provider-protocol`), `http`,
   `serde`, `serde_json`. No `wit-bindgen` and no `carina-plugin-wit`
@@ -224,15 +229,20 @@ with `--trust-local-provider <path>=github`.
 ## CI and release
 
 CI runs `check`, `test`, `clippy -D warnings`, `fmt --check`, a
-`wasm32-wasip2` release build, the pin check and the bindings guard.
+`wasm32-wasip2` release build, the pin check and the bindings guard. Two
+jobs cover the documentation: one regenerates `generated-docs/github`
+with `scripts/generate-docs.sh` and fails if the committed pages differ,
+and one builds the docs bundle and checks it with `carina-docgen-check`
+and the registry's `carina-docs-bundle` checker.
 
-Release is not wired yet. The existing release workflow is from the
-scaffold: it builds native binaries, which are empty now that the crate
-is a WASM component, and publishes nothing. It must be replaced before the
-first tag. The plan: release uses `carina-rs/provider-release` (the reusable WASM build plus
-the `github-release`, `publish` and `yank` actions, pinned by SHA), as the
-AWS providers do. The first release goes to the dev registry. A formal
-release tag needs the user's approval.
+Release uses `carina-rs/provider-release` (the reusable WASM and docs
+build plus the `github-release`, `publish` and `yank` actions, pinned by
+SHA), as the AWS providers do. The bundle's index page is the
+hand-written `docs/registry/index.md`. The first release goes to the dev
+registry, through a separate CI job that is not wired yet. Before a
+registry release, the repository needs a `release` environment limited to
+`v*` tags and a trusted-publisher entry in the registry. A formal release
+tag needs the user's approval.
 
 ## Not in the first release
 

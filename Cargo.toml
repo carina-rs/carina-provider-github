@@ -1,11 +1,14 @@
 [workspace]
 members = [
     "carina-provider-github",
+    "carina-provider-github-docgen",
 ]
+default-members = ["carina-provider-github"]
 resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
 
 [workspace.dependencies]
-carina-plugin-sdk = { git = "https://github.com/carina-rs/carina", rev = "ae8d2515d79ff27346f50ce7730863cdf436c1f7" }
+carina-plugin-sdk = { git = "https://github.com/carina-rs/carina", rev = "207e75101db9df9e1787219a79533e1e474c96cb" }
+carina-docgen = { git = "https://github.com/carina-rs/carina-provider-aws", rev = "484e90981d031bb33d1c19be1b7042dd9b6b39b8" }

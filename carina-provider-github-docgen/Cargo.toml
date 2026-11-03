@@ -1,0 +1,19 @@
+[package]
+name = "carina-provider-github-docgen"
+version.workspace = true
+edition = "2024"
+publish = false
+license = "MIT"
+
+[[bin]]
+name = "docgen"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+carina-provider-github = { path = "../carina-provider-github" }
+carina-docgen = { workspace = true }
+carina-plugin-sdk = { workspace = true }
+
+[dev-dependencies]
+comrak = { version = "=0.54.0", default-features = false }

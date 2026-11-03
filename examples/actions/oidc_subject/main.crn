@@ -1,0 +1,4 @@
+github.actions.OidcSubject {
+  repository = "carina-rs/carina"
+  claim_keys = [repo, context, job_workflow_ref]
+}

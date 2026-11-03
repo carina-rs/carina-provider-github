@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --locked
+      - run: cargo check --locked --workspace --all-targets
 
   test:
     name: Test
@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
+      - run: cargo test --locked --workspace
 
   clippy:
     name: Clippy
@@ -36,7 +36,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   fmt:
     name: Format
@@ -47,6 +47,48 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+
+  docs-drift:
+    name: Docs Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate docs from exported provider schemas
+        run: ./scripts/generate-docs.sh
+      - name: Verify committed docs are current
+        run: |
+          docs_status=$(git status --porcelain -- generated-docs)
+          if [ -n "$docs_status" ]; then
+            printf '%s\n' "$docs_status"
+            git diff -- generated-docs
+            echo "::error::Docs generation produced uncommitted changes. Run './scripts/generate-docs.sh' locally and commit the regenerated generated-docs/."
+            exit 1
+          fi
+
+  docs-bundle:
+    name: Docs Bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test docs bundle tooling
+        run: python3 -m unittest discover -s scripts -p 'test_docs_bundle.py'
+      - name: Build docs bundle
+        run: python3 scripts/docs-bundle.py build "$RUNNER_TEMP/carina-provider-github-docs.tar.gz"
+      - name: Check shipped Markdown pages
+        run: |
+          rev=$(sed -n '/^name = "carina-docgen"$/,/^source/ { s/^source = ".*#\([0-9a-f]*\)"$/\1/p; }' Cargo.lock)
+          test -n "$rev"
+          cargo install --locked --git https://github.com/carina-rs/carina-provider-aws --rev "$rev" --features check-bin --bin carina-docgen-check carina-docgen
+          carina-docgen-check "$RUNNER_TEMP/carina-provider-github-docs.tar.gz"
+      - name: Validate docs bundle
+        run: |
+          # Keep this rev equal to the one in provider-release's build.yml, which matches the carina-docs-bundle revision in the deployed registry's Cargo.lock.
+          cargo install --locked --git https://github.com/carina-rs/carina-docs-bundle --rev c6bfdcec781abf0ddb61268e5e7d114717353e4f carina-docs-bundle
+          carina-docs-bundle check "$RUNNER_TEMP/carina-provider-github-docs.tar.gz" --namespace carina-rs --name github
 
   wasm-build:
     name: Build WASM
