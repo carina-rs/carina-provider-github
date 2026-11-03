@@ -139,50 +139,62 @@ fn schema_patterns_defaults_enum_values_and_transforms_keep_their_spelling() {
 }
 
 #[test]
-fn link_shaped_literals_fail_with_the_attribute_name() {
+fn link_shaped_literals_round_trip_as_code() {
     let literal = "^[a](b)$";
-    for attribute in [
-        input(
-            "pattern",
-            AttributeType::refined_string(None, Some(literal.into()), None, None),
-        ),
-        AttributeSchema::optional("default", AttributeType::string())
-            .with_default(Value::Concrete(ConcreteValue::String(literal.into())))
-            .build(),
-        input("enum_value", choice("Choice", &[literal])),
-        input(
-            "transform",
-            AttributeType::enum_(
-                TypeIdentity::new(Some("github"), ["test", "Literals"], "Transformed"),
-                None,
-                vec![],
-                None,
-                Some(DslTransform::StripSuffix(literal.into())),
+    let pattern = format!("String (pattern: {literal})");
+    let default = Value::Concrete(ConcreteValue::String(literal.into()));
+    let transform = DslTransform::StripSuffix(literal.into());
+    for (attribute, expected) in [
+        (
+            input(
+                "pattern",
+                AttributeType::refined_string(None, Some(literal.into()), None, None),
             ),
+            pattern.clone(),
         ),
-        input(
-            "nested",
-            AttributeType::struct_(
-                "Settings",
-                vec![field(
-                    "pattern",
-                    AttributeType::refined_string(None, Some(literal.into()), None, None),
-                )],
+        (
+            AttributeSchema::optional("default", AttributeType::string())
+                .with_default(default.clone())
+                .build(),
+            format_value(&default),
+        ),
+        (
+            input("enum_value", choice("Choice", &[literal])),
+            literal.to_string(),
+        ),
+        (
+            input(
+                "transform",
+                AttributeType::enum_(
+                    TypeIdentity::new(Some("github"), ["test", "Literals"], "Transformed"),
+                    None,
+                    vec![],
+                    None,
+                    Some(transform.clone()),
+                ),
             ),
+            format!("{transform:?}"),
+        ),
+        (
+            input(
+                "nested",
+                AttributeType::struct_(
+                    "Settings",
+                    vec![field(
+                        "pattern",
+                        AttributeType::refined_string(None, Some(literal.into()), None, None),
+                    )],
+                ),
+            ),
+            pattern,
         ),
     ] {
         let name = attribute.name().to_string();
-        let schema = ResourceSchema::new("test.Rejected")
-            .attribute(attribute)
-            .validate()
-            .unwrap();
-        let error = format!("{:#}", render_page(&schema, None).unwrap_err());
-        assert!(error.contains(&format!("attribute `{name}")), "{error}");
+        let page = page(ResourceSchema::new("test.Literals").attribute(attribute));
         assert!(
-            error.contains("Markdown link is inside a code span"),
-            "{error}"
+            rendered_code(&page).contains(&expected),
+            "attribute `{name}` lost literal {expected:?}: {page}"
         );
-        assert!(error.contains(literal), "{error}");
     }
 }
 
