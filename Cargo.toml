@@ -8,4 +8,4 @@ resolver = "3"
 version = "0.1.0"
 
 [workspace.dependencies]
-carina-plugin-sdk = { git = "https://github.com/carina-rs/carina", rev = "417c489ff" }
+carina-plugin-sdk = { git = "https://github.com/carina-rs/carina", rev = "ae8d2515d79ff27346f50ce7730863cdf436c1f7" }
