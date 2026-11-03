@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -99,7 +102,25 @@ jobs:
         with:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
       - run: cargo build --locked -p carina-provider-github --target wasm32-wasip2 --release
+      - name: Cache vela-cli
+        id: cache-vela
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/vela
+          key: vela-cli-${{ runner.os }}-4611418f8a84426b4b79077cae3f59357ca09ff7
+      - name: Install vela-cli
+        if: steps.cache-vela.outputs.cache-hit != 'true'
+        run: cargo install --git https://github.com/mizzy/vela --rev 4611418f8a84426b4b79077cae3f59357ca09ff7 vela-cli --quiet
+      - name: Optimize WASM with vela
+        run: vela optimize target/wasm32-wasip2/release/carina-provider-github.wasm -o target/wasm32-wasip2/release/carina-provider-github.wasm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: carina-provider-github.wasm
+          path: target/wasm32-wasip2/release/carina-provider-github.wasm
+          overwrite: true
 
   carina-pin:
     name: Check Carina pin
@@ -116,3 +137,167 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: bash scripts/check-provider-sdk-bindings.sh
       - run: bash scripts/test-check-provider-sdk-bindings.sh
+
+  publish-dev:
+    name: Publish to Carina Registry (dev)
+    needs: [check, test, clippy, fmt, docs-drift, docs-bundle, wasm-build, carina-pin, sdk-bindings]
+    if: github.repository == 'carina-rs/carina-provider-github' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    env:
+      REGISTRY_AUDIENCE: registry-dev.carina-rs.dev
+      REGISTRY_PUBLISH_URL: https://publish.registry-dev.carina-rs.dev/v1/publish
+      ROLLING_RELEASE_TAG: main-builds
+    steps:
+      - name: Download WASM Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: carina-provider-github.wasm
+
+      - name: Prepare Publish Asset
+        run: |
+          set -euo pipefail
+
+          short_sha=${GITHUB_SHA::7}
+          version="0.0.0-main.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}.g${short_sha}"
+          mv carina-provider-github.wasm "carina-provider-github-${version}.wasm"
+          printf 'VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+
+      # Pin v2.6.5: the registry requires Rekor v1's SET; Rekor v2 issues no SET,
+      # and cosign v3 defaults to signing-config, which routes to Rekor v2.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v2.6.5'
+
+      - name: Upload to Rolling Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "$ROLLING_RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$ROLLING_RELEASE_TAG" \
+              --prerelease \
+              --title "main builds" \
+              --notes "Rolling container for 0.0.0-main.* dogfooding builds. The Carina registry records these asset download URLs; do not delete this release or its assets, or pinned 0.0.0-main.* resolution will break." \
+              || true
+            if ! gh release view "$ROLLING_RELEASE_TAG" >/dev/null 2>&1; then
+              echo "Failed to create rolling release $ROLLING_RELEASE_TAG" >&2
+              exit 1
+            fi
+          fi
+          gh release upload "$ROLLING_RELEASE_TAG" "carina-provider-github-${VERSION}.wasm"
+
+      - name: Sign WASM Artifact (keyless)
+        run: |
+          set -euo pipefail
+
+          for attempt in 1 2 3; do
+            if cosign sign-blob "carina-provider-github-${VERSION}.wasm" \
+              --bundle sigstore-bundle.json \
+              --new-bundle-format=true \
+              --yes; then
+              break
+            fi
+
+            printf 'Signing attempt %s failed\n' "$attempt" >&2
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+              continue
+            fi
+            printf 'Signing failed after 3 attempts\n' >&2
+            exit 1
+          done
+
+      - name: Publish to Carina Registry
+        # For a 403 claim_mismatch, verify that the providers.github trusted-publisher
+        # policy uses the main-branch-only sentinel and points to
+        # .github/workflows/ci.yml.
+        run: |
+          set -euo pipefail
+
+          if ! jq -e 'type == "object"' sigstore-bundle.json >/dev/null; then
+            echo "sigstore-bundle.json is missing or not a JSON object" >&2
+            exit 1
+          fi
+
+          version="$VERSION"
+          asset_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${ROLLING_RELEASE_TAG}/carina-provider-github-${version}.wasm"
+          payload=$(jq -n \
+            --arg version "$version" \
+            --arg asset_url "$asset_url" \
+            --slurpfile bundle sigstore-bundle.json \
+            '{
+              namespace: "carina-rs",
+              name: "github",
+              version: $version,
+              candidate_download_url: $asset_url,
+              sigstore_bundle: $bundle[0]
+            }')
+          response_file=$(mktemp)
+          trap 'rm -f "$response_file"' EXIT
+
+          # The Fulcio cert from the sign step lives ~10 minutes and must still be valid
+          # when the registry verifies a new version's bundle; this loop's worst case
+          # (3 x (60s token + 120s POST) + 2 x 10s sleep) nearly exhausts it, so do not
+          # add attempts, sleeps, or timeout headroom here.
+          for attempt in 1 2 3; do
+            if ! token=$(curl -sS \
+              --connect-timeout 10 \
+              --max-time 60 \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${REGISTRY_AUDIENCE}" \
+              | jq -er .value) || [ -z "$token" ]; then
+              printf 'Failed to obtain OIDC token on attempt %s\n' "$attempt" >&2
+              if [ "$attempt" -lt 3 ]; then
+                sleep 10
+                continue
+              fi
+              printf 'Publish failed after 3 attempts while obtaining OIDC token\n' >&2
+              exit 1
+            fi
+
+            : > "$response_file"
+            if ! status=$(curl -sS \
+              --connect-timeout 10 \
+              --max-time 120 \
+              -o "$response_file" \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer $token" \
+              -H 'Content-Type: application/json' \
+              --data "$payload" \
+              "$REGISTRY_PUBLISH_URL"); then
+              status=000
+            fi
+
+            printf 'Publish attempt %s returned HTTP %s\n' "$attempt" "$status"
+            sed 's/^/  /' "$response_file"
+            printf '\n'
+
+            case "$status" in
+              200|201)
+                exit 0
+                ;;
+              000|429|5??)
+                if [ "$attempt" -lt 3 ]; then
+                  sleep 10
+                  continue
+                fi
+                printf 'Publish failed after 3 attempts (last status: %s)\n' "$status" >&2
+                exit 1
+                ;;
+              4??)
+                printf 'Publish failed with non-retryable status %s\n' "$status" >&2
+                exit 1
+                ;;
+              *)
+                printf 'Publish failed with unexpected status %s\n' "$status" >&2
+                exit 1
+                ;;
+            esac
+          done
