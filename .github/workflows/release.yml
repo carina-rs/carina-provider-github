@@ -16,7 +16,7 @@ jobs:
   build:
     name: Build
     if: github.event_name == 'push'
-    uses: carina-rs/provider-release/.github/workflows/build.yml@355aa799082912dc4df5c3fff610502442104701
+    uses: carina-rs/provider-release/.github/workflows/build.yml@25d0c075c00be49a703b532c91739cc5dc163fb4
     with:
       provider: carina-provider-github
       name: github
@@ -41,7 +41,7 @@ jobs:
       contents: write
     steps:
       - name: Create Release
-        uses: carina-rs/provider-release/github-release@355aa799082912dc4df5c3fff610502442104701
+        uses: carina-rs/provider-release/github-release@25d0c075c00be49a703b532c91739cc5dc163fb4
         with:
           provider: carina-provider-github
 
@@ -58,7 +58,7 @@ jobs:
         # Signing/publish intentionally stay in this job so OIDC job_workflow_ref and the
         # Fulcio SAN remain this release.yml (the registry's trusted-publisher policy points
         # here); bump the SHA only after reviewing the provider-release diff.
-        uses: carina-rs/provider-release/publish@355aa799082912dc4df5c3fff610502442104701
+        uses: carina-rs/provider-release/publish@25d0c075c00be49a703b532c91739cc5dc163fb4
         with:
           provider: carina-provider-github
           name: github
@@ -73,7 +73,7 @@ jobs:
       id-token: write
     steps:
       - name: Yank from Carina Registry
-        uses: carina-rs/provider-release/yank@355aa799082912dc4df5c3fff610502442104701
+        uses: carina-rs/provider-release/yank@25d0c075c00be49a703b532c91739cc5dc163fb4
         with:
           name: github
           namespace: carina-rs

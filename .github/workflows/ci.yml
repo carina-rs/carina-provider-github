@@ -94,33 +94,15 @@ jobs:
           carina-docs-bundle check "$RUNNER_TEMP/carina-provider-github-docs.tar.gz" --namespace carina-rs --name github
 
   wasm-build:
-    name: Build WASM
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: wasm
-      - run: cargo build --locked -p carina-provider-github --target wasm32-wasip2 --release
-      - name: Cache vela-cli
-        id: cache-vela
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/vela
-          key: vela-cli-${{ runner.os }}-4611418f8a84426b4b79077cae3f59357ca09ff7
-      - name: Install vela-cli
-        if: steps.cache-vela.outputs.cache-hit != 'true'
-        run: cargo install --git https://github.com/mizzy/vela --rev 4611418f8a84426b4b79077cae3f59357ca09ff7 vela-cli --quiet
-      - name: Optimize WASM with vela
-        run: vela optimize target/wasm32-wasip2/release/carina-provider-github.wasm -o target/wasm32-wasip2/release/carina-provider-github.wasm
-      - uses: actions/upload-artifact@v4
-        with:
-          name: carina-provider-github.wasm
-          path: target/wasm32-wasip2/release/carina-provider-github.wasm
-          overwrite: true
+    name: WASM Build
+    uses: carina-rs/provider-release/.github/workflows/build.yml@25d0c075c00be49a703b532c91739cc5dc163fb4
+    with:
+      provider: carina-provider-github
+      name: github
+      namespace: carina-rs
+      wasm-only: true
+      wasm-artifact-name: carina-provider-github.wasm
+      wasm-file-name: carina-provider-github.wasm
 
   carina-pin:
     name: Check Carina pin
