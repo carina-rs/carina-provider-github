@@ -425,55 +425,6 @@ fn field_groups_render_at_resource_and_struct_levels() {
 }
 
 #[test]
-fn map_lengths_render_inline_in_definitions_and_in_struct_fields() {
-    let mut schema = ResourceSchema::new("test.Maps");
-    let mut fields = Vec::new();
-    let mut expectations = Vec::new();
-    for (name, length, suffix) in [
-        ("unbounded", None, ""),
-        ("minimum", Some((Some(1), None)), " (entries: 1..)"),
-        ("maximum", Some((None, Some(8))), " (entries: ..=8)"),
-        ("bounded", Some((Some(1), Some(8))), " (entries: 1..=8)"),
-        ("empty", Some((Some(0), Some(0))), " (entries: 0..=0)"),
-    ] {
-        let ty =
-            AttributeType::refined_map(AttributeType::string(), AttributeType::float(), length);
-        schema = schema
-            .attribute(input(name, ty.clone()))
-            .with_def(format!("Map_{name}"), ty.clone());
-        fields.push(field(name, ty));
-        expectations.push((name, format!("Map\\<`String`, `Float`\\>{suffix}")));
-    }
-    let page = page(schema.with_def("Settings", AttributeType::struct_("Settings", fields)));
-    for (name, expected) in expectations {
-        for context in [
-            format!("### `{name}`\n\n- **Type:** {expected}\n"),
-            format!("| `Map_{name}` | {expected} |"),
-            format!("| `{name}` | {expected} | No |"),
-        ] {
-            assert!(page.contains(&context), "missing {context}: {page}");
-        }
-    }
-}
-
-#[test]
-fn recursive_maps_keep_their_entry_bounds() {
-    let schema = ResourceSchema::new("test.RecursiveMap")
-        .with_def(
-            "Entries",
-            AttributeType::refined_map(
-                AttributeType::string(),
-                AttributeType::ref_("Entries"),
-                Some((Some(1), Some(4))),
-            ),
-        )
-        .attribute(input("entries", AttributeType::ref_("Entries")));
-    let page = page(schema);
-    assert!(page.contains("## Recursive Type Definitions\n"));
-    assert_eq!(page.matches(" (entries: 1..=4)").count(), 3);
-}
-
-#[test]
 fn aliases_reject_cycles_and_preserve_recursive_definitions() {
     for mutual in [false, true] {
         for used in [false, true] {

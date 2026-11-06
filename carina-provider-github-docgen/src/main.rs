@@ -652,21 +652,11 @@ impl<'a> SchemaTypes<'a> {
                     refinements.join(", ")
                 )
             }
-            RawShape::Map {
-                key,
-                value,
-                constraints,
-            } => {
-                let mut text = format!(
-                    "Map\\<{}, {}\\>",
-                    nested(key, active, recursive)?,
-                    nested(value, active, recursive)?
-                );
-                if let Some(length) = constraints.length() {
-                    text.push_str(&format!(" (entries: {})", bounds(length)));
-                }
-                text
-            }
+            RawShape::Map { key, value, .. } => format!(
+                "Map\\<{}, {}\\>",
+                nested(key, active, recursive)?,
+                nested(value, active, recursive)?
+            ),
             RawShape::UnloadedSchemaType(unloaded) => bail!("unloaded schema type: {unloaded:?}"),
             RawShape::Ref(_) => unreachable!("intern resolves aliases"),
         };
