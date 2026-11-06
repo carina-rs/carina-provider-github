@@ -652,6 +652,8 @@ impl<'a> SchemaTypes<'a> {
                     refinements.join(", ")
                 )
             }
+            // Map entry bounds are not rendered here: this local renderer is
+            // slated for replacement by carina-docgen (carina-rs/carina-provider-github#20).
             RawShape::Map { key, value, .. } => format!(
                 "Map\\<{}, {}\\>",
                 nested(key, active, recursive)?,
