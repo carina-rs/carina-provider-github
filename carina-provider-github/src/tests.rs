@@ -158,7 +158,9 @@ fn normalize_desired_inserts_use_default_for_absent_known_and_deferred_keys() {
         (None, true),
         (Some(known.clone()), false),
         (
-            Some(CoreValue::Deferred(DeferredValue::Secret(Box::new(known)))),
+            Some(CoreValue::Deferred(DeferredValue::Secret(
+                Box::new(known).into(),
+            ))),
             false,
         ),
     ] {
@@ -184,9 +186,9 @@ fn normalize_desired_keeps_existing_use_default() {
         for claim_keys in [
             None,
             Some(known.clone()),
-            Some(CoreValue::Deferred(DeferredValue::Secret(Box::new(
-                known.clone(),
-            )))),
+            Some(CoreValue::Deferred(DeferredValue::Secret(
+                Box::new(known.clone()).into(),
+            ))),
         ] {
             let existing = CoreValue::Concrete(ConcreteValue::Bool(existing));
             let resource = normalize_desired_resource(
@@ -201,9 +203,9 @@ fn normalize_desired_keeps_existing_use_default() {
 
 #[test]
 fn normalize_desired_preserves_deferred_use_default() {
-    let existing = CoreValue::Deferred(DeferredValue::Secret(Box::new(CoreValue::Concrete(
-        ConcreteValue::Bool(true),
-    ))));
+    let existing = CoreValue::Deferred(DeferredValue::Secret(
+        Box::new(CoreValue::Concrete(ConcreteValue::Bool(true))).into(),
+    ));
     let resource = normalize_desired_resource("actions.OidcSubject", None, Some(existing.clone()));
     assert_eq!(resource.attributes["use_default"], existing);
 }
