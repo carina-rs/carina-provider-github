@@ -2,7 +2,8 @@ use super::*;
 use carina_plugin_sdk::core::FiniteF64;
 use carina_plugin_sdk::core::resource::{ConcreteValue, Value};
 use carina_plugin_sdk::core::schema::{
-    AttributeSchema, AttributeType, DslTransform, ResourceSchema, StructField, TypeIdentity,
+    AttributeSchema, AttributeType, DslTransform, FieldGroup, FieldGroupKind, ResourceSchema,
+    StructField, TypeIdentity,
 };
 use comrak::nodes::NodeValue;
 
@@ -66,27 +67,33 @@ fn literals_round_trip_as_parsed_text_inline_and_in_tables() {
             r"first\nsecond\tthird\u{d}\u{0}\u{1}\u{b}\u{1f}",
         ),
     ] {
-        let mut markdown = format!("# Literal\n\n{}\n\n", code_span(literal, false).unwrap());
-        table(
-            &mut markdown,
-            ["Literal"],
-            [Ok([code_span(literal, true).unwrap()])],
-        )
-        .unwrap();
+        let mut markdown = PageBuilder::<()>::new();
+        markdown.heading(Heading::plain(1, "Literal")).unwrap();
+        markdown.push_str(&inline_code(literal).unwrap());
+        markdown.push_str("\n\n");
+        markdown
+            .table(["Literal"], [[TableCell::code(literal)]])
+            .unwrap();
+        let markdown = markdown.finish().unwrap();
         assert_eq!(rendered_code(&markdown), [expected, expected], "{markdown}");
         carina_docgen::check_page(&markdown).unwrap();
     }
-    assert_eq!(code_span("`a``b`", false).unwrap(), "``` `a``b` ```");
-    assert_eq!(code_span("a|b", false).unwrap(), "`a|b`");
-    assert_eq!(code_span("a|b", true).unwrap(), r"`a\|b`");
-    assert_eq!(rendered_code(&code_span(r"\|", false).unwrap()), [r"\|"]);
-    assert!(
-        code_span(r"\|", true)
-            .unwrap_err()
-            .to_string()
-            .contains("cannot round-trip")
-    );
-    assert!(code_span("", false).is_err());
+    assert_eq!(inline_code("`a``b`").unwrap(), "``` `a``b` ```");
+    assert_eq!(inline_code("a|b").unwrap(), "`a|b`");
+    assert_eq!(rendered_code(&inline_code(r"\|").unwrap()), [r"\|"]);
+    let mut table = PageBuilder::<()>::new();
+    table
+        .table(
+            ["Literal"],
+            [[TableCell::code("a|b")], [TableCell::code(r"\|")]],
+        )
+        .unwrap();
+    let table = table.finish().unwrap();
+    assert!(table.contains(r"`a\|b`"));
+    // The shared renderer preserves this literal by splitting it into adjacent
+    // code spans instead of rejecting the odd backslash run before the pipe.
+    assert_eq!(rendered_code(&table), ["a|b", r"\", "|"]);
+    assert!(inline_code("").is_err());
 }
 
 #[test]
@@ -208,8 +215,11 @@ fn real_oidc_subject_page_matches_the_schema_and_registry_shape() {
     let schemas = resource_schemas();
     let resource = schemas[0].as_schema();
     let RawShape::String {
+        identity: _identity,
         pattern: Some(pattern),
-        ..
+        length: _length,
+        validate: _validate,
+        to_dsl: _to_dsl,
     } = resource.attributes()["repository"].attr_type().raw_shape()
     else {
         panic!("repository must declare its pattern")
@@ -422,6 +432,30 @@ fn field_groups_render_at_resource_and_struct_levels() {
             2
         );
     }
+}
+
+#[test]
+fn map_entry_bounds_render_in_attributes_and_definition_tables() {
+    let bounded = AttributeType::refined_map(
+        AttributeType::string(),
+        AttributeType::int(),
+        Some((Some(2), Some(5))),
+    );
+    let page = page(
+        ResourceSchema::new("test.MapBounds")
+            .attribute(input("entries", bounded.clone()))
+            .attribute(output("observed", bounded.clone()))
+            .with_def("Entries", bounded.clone())
+            .with_def(
+                "Settings",
+                AttributeType::struct_("Settings", vec![field("entries", bounded)]),
+            ),
+    );
+    let expected = r"Map\<`String`, `Int`\> (entries: 2..=5)";
+    assert!(page.contains(&format!("### `entries`\n\n- **Type:** {expected}\n")));
+    assert!(page.contains(&format!("### `observed`\n\n- **Type:** {expected}\n")));
+    assert!(page.contains(&format!("| `Entries` | {expected} |")));
+    assert!(page.contains(&format!("| `entries` | {expected} | No |  |")));
 }
 
 #[test]

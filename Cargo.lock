@@ -198,12 +198,13 @@ dependencies = [
 [[package]]
 name = "carina-docgen"
 version = "0.9.0"
-source = "git+https://github.com/carina-rs/carina-provider-aws?rev=e46e5d0f1f12638ba1b2b58ead40ef1141fda7dc#e46e5d0f1f12638ba1b2b58ead40ef1141fda7dc"
+source = "git+https://github.com/carina-rs/carina-provider-aws?rev=3e3e90fc263115d38b69472c673e6c828b55fd32#3e3e90fc263115d38b69472c673e6c828b55fd32"
 dependencies = [
  "anyhow",
  "carina-core",
  "comrak",
  "finl_unicode",
+ "thiserror",
 ]
 
 [[package]]
