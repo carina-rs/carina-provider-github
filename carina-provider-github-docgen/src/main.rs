@@ -394,7 +394,7 @@ fn children(ty: &CompiledAttributeType) -> Result<Vec<(String, &CompiledAttribut
         RawShape::UnloadedSchemaType(unloaded) => bail!("unloaded schema type: {unloaded:?}"),
         RawShape::Enum { base, .. } => vec![("base".into(), base)],
         RawShape::List { element_type, .. } => vec![("item".into(), element_type)],
-        RawShape::Map { key, value } => vec![("key".into(), key), ("value".into(), value)],
+        RawShape::Map { key, value, .. } => vec![("key".into(), key), ("value".into(), value)],
         RawShape::Struct { fields, .. } => fields
             .iter()
             .map(|field| (field.name().into(), field.field_type()))
@@ -652,7 +652,9 @@ impl<'a> SchemaTypes<'a> {
                     refinements.join(", ")
                 )
             }
-            RawShape::Map { key, value } => format!(
+            // Map entry bounds are not rendered here: this local renderer is
+            // slated for replacement by carina-docgen (carina-rs/carina-provider-github#20).
+            RawShape::Map { key, value, .. } => format!(
                 "Map\\<{}, {}\\>",
                 nested(key, active, recursive)?,
                 nested(value, active, recursive)?

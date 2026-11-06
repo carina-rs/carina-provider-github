@@ -1,4 +1,5 @@
 use super::*;
+use carina_plugin_sdk::core::FiniteF64;
 use carina_plugin_sdk::core::resource::{ConcreteValue, Value};
 use carina_plugin_sdk::core::schema::{
     AttributeSchema, AttributeType, DslTransform, ResourceSchema, StructField, TypeIdentity,
@@ -467,7 +468,10 @@ fn aliases_reject_cycles_and_preserve_recursive_definitions() {
                                 Some("^key$".into()),
                                 Some((None, Some(8))),
                             ),
-                            AttributeType::refined_float(None, Some((None, Some(0.5)))),
+                            AttributeType::refined_float(
+                                None,
+                                Some((None, Some(FiniteF64::new(0.5).unwrap()))),
+                            ),
                         ),
                     ),
                 ],
