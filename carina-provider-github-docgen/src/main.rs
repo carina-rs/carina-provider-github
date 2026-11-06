@@ -1,14 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
-use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use carina_docgen::example::{self, DocExample, ExampleKind};
+use carina_docgen::{
+    Declaration, DeclarationKind, DocLink, Heading, PageBuilder, Resolved, TableCell, TypeDocHooks,
+    TypeEdge, TypeRegistry, render_attribute_type, render_field_groups,
+};
 use carina_plugin_sdk::core::schema::{
-    CompiledAttributeType, DslMap, FieldGroup, FieldGroupKind, IdentityMode, ListElements,
-    RawShape, ValidatedResourceSchema,
+    Compiled, CompiledAttributeType, CompiledResourceSchema, CompiledStructField, CustomValidator,
+    DslMap, DslTransform, FieldGroup, IdentityMode, RawShape, TypeIdentity,
+    ValidatedResourceSchema,
 };
 use carina_plugin_sdk::core::value::format_value;
 use carina_provider_github::resource_schemas;
@@ -107,27 +111,47 @@ fn generate_pages(examples_dir: &Path) -> Result<BTreeMap<PathBuf, String>> {
 }
 
 fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -> Result<String> {
-    let resource = schema.as_schema();
-    let types = SchemaTypes::collect(schema)?;
-    let mut recursive = BTreeSet::new();
-    let mut page = format!("# {PROVIDER}.{}\n\n", resource.resource_type());
+    render_schema_page(schema.as_schema(), example)
+}
+
+fn render_schema_page(
+    resource: &CompiledResourceSchema,
+    example: Option<&DocExample>,
+) -> Result<String> {
+    let mut types = SchemaTypes::collect(resource)?;
+    let mut registry = TypeRegistry::default();
+    // Discover every declaration before writing sections, preserving the existing
+    // intern order even when a type is only used by a later definition.
+    // This pre-pass owns the attribute-path error context for every type render.
+    for id in 0..types.types.len() {
+        let ty = types.types[id];
+        render_attribute_type(ty, &(), &mut types, &mut registry, None)
+            .with_context(|| format!("cannot render type at attribute `{}`", types.paths[id]))?;
+    }
+    let mut page = PageBuilder::new();
+    page.heading(Heading::plain(
+        1,
+        format!("{PROVIDER}.{}", resource.resource_type()),
+    ))?;
     if let Some(description) = resource.description() {
         page.push_str(&format!("{}\n\n", description_text(description)));
     }
     if resource.prevents_destroy_by_default() {
-        page.push_str("Destruction protection is enabled by default. To opt out, set `directives { prevent_destroy = false }`.\n\n");
+        let mut protection =
+            TableCell::text("Destruction protection is enabled by default. To opt out, set ");
+        protection.push_code("directives { prevent_destroy = false }");
+        protection.push_text(".\n\n");
+        page.inline(protection);
     }
     if let Some(example) = example {
         let text = example.text_for(PROVIDER, resource.resource_type(), ExampleKind::Resource)?;
-        page.push_str(&format!(
-            "## Example\n\n```crn\n{}\n```\n\n",
-            text.trim_end_matches('\n')
-        ));
+        page.heading(Heading::plain(2, "Example"))?;
+        page.push_str(&format!("```crn\n{}\n```\n\n", text.trim_end_matches('\n')));
     }
     for (read_only, title) in [(false, "Argument Reference"), (true, "Attribute Reference")] {
-        page.push_str(&format!("## {title}\n\n"));
+        page.heading(Heading::plain(2, title))?;
         if !read_only {
-            render_field_groups(&mut page, resource.field_groups())?;
+            render_field_groups(&mut page, resource.field_groups());
         }
         for attribute in resource
             .attributes()
@@ -135,11 +159,12 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
             .filter(|a| a.is_read_only() == read_only)
         {
             let name = attribute.name();
-            let ty = types.describe(attribute.attr_type(), false, &mut recursive)?;
-            page.push_str(&format!(
-                "### {}\n\n- **Type:** {ty}\n",
-                code_span(name, false)?
-            ));
+            let ty =
+                render_attribute_type(attribute.attr_type(), &(), &mut types, &mut registry, None)?;
+            page.heading(Heading::code(3, name))?;
+            page.push_str("- **Type:** ");
+            ty.write_to(&mut page);
+            page.push_str("\n");
             if read_only {
                 page.push_str("- **Read-only**\n");
             } else {
@@ -148,9 +173,9 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                     if attribute.is_required() { "Yes" } else { "No" }
                 ));
                 if let Some(default) = attribute.default_value() {
-                    let code = code_span(&format_value(default), false)
-                        .with_context(|| format!("cannot render default of attribute `{name}`"))?;
-                    page.push_str(&format!("- **Default:** {code}\n"));
+                    page.push_str("- **Default:** ");
+                    page.inline(TableCell::code(format_value(default)));
+                    page.push_str("\n");
                 }
                 for metadata in field_metadata(
                     attribute.is_create_only(),
@@ -160,43 +185,52 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                     page.push_str(&format!("- {metadata}\n"));
                 }
             }
-            page.push('\n');
+            page.push_str("\n");
             if let Some(description) = attribute.description() {
                 page.push_str(&format!("{}\n\n", description_text(description)));
             }
         }
     }
     if !resource.defs().is_empty() {
-        page.push_str("## Type Definitions\n\n");
-        table(
-            &mut page,
-            ["Name", "Type"],
-            resource.defs().iter().map(|(name, ty)| {
+        page.heading(Heading::plain(2, "Type Definitions"))?;
+        let rows = resource
+            .defs()
+            .iter()
+            .map(|(name, ty)| {
                 Ok([
-                    code_span(name, true)?,
-                    types.describe(ty, true, &mut recursive)?,
+                    TableCell::code(name),
+                    render_attribute_type(ty, &(), &mut types, &mut registry, None)?.table_cell(),
                 ])
-            }),
-        )?;
+            })
+            .collect::<Result<Vec<_>>>()?;
+        page.table(["Name", "Type"], rows)?;
+        page.push_str("\n");
     }
-    for section in ["Enum Values", "Struct Definitions", "Union Definitions"] {
-        let mut started = false;
-        for (id, ty) in types.types.iter().enumerate() {
-            if !matches!(
-                (section, ty.raw_shape()),
-                ("Enum Values", RawShape::Enum { .. })
-                    | ("Struct Definitions", RawShape::Struct { .. })
-                    | ("Union Definitions", RawShape::Union(_))
-            ) {
-                continue;
-            }
-            if !started {
-                page.push_str(&format!("## {section}\n\n"));
-                started = true;
-            }
-            page.push_str(&format!("### {}\n\n", code_span(&types.labels[id], false)?));
-            match ty.raw_shape() {
-                RawShape::Enum {
+    let mut sections = [
+        ("Enum Values", Vec::new()),
+        ("Struct Definitions", Vec::new()),
+        ("Union Definitions", Vec::new()),
+    ];
+    for id in 0..types.types.len() {
+        let Some((target, definition)) = types.definitions.remove(&id) else {
+            continue;
+        };
+        let section = match &definition {
+            Definition::Enum { .. } => 0,
+            Definition::Struct { .. } => 1,
+            Definition::Union { .. } => 2,
+        };
+        sections[section].1.push((id, target, definition));
+    }
+    for (section, definitions) in sections {
+        if definitions.is_empty() {
+            continue;
+        }
+        page.heading(Heading::plain(2, section))?;
+        for (id, target, definition) in definitions {
+            page.target_heading(target, Heading::code(3, &types.labels[id]))?;
+            match definition {
+                Definition::Enum {
                     identity,
                     base,
                     values,
@@ -204,54 +238,41 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                     validate,
                     to_dsl,
                 } => {
-                    page.push_str(&format!(
-                        "- **Base type:** {}\n\n",
-                        types.describe(base, false, &mut recursive)?
-                    ));
+                    page.push_str("- **Base type:** ");
+                    render_attribute_type(base, &(), &mut types, &mut registry, None)?
+                        .write_to(&mut page);
+                    page.push_str("\n\n");
                     if validate.is_some() {
                         page.push_str("Values are also checked by a custom validator.\n\n");
                     }
                     if let Some(transform) = to_dsl {
-                        let code =
-                            code_span(&format!("{transform:?}"), false).with_context(|| {
-                                format!(
-                                    "cannot render transform at attribute `{}`",
-                                    types.paths[id]
-                                )
-                            })?;
-                        page.push_str(&format!("DSL transform: {code}.\n\n"));
+                        let mut transform_prose = TableCell::text("DSL transform: ");
+                        transform_prose.push_code(format!("{transform:?}"));
+                        transform_prose.push_text(".\n\n");
+                        page.inline(transform_prose);
                     }
-                    if let Some(values) = values {
-                        let mapping = DslMap::new(dsl_aliases, to_dsl);
-                        table(
-                            &mut page,
-                            ["DSL Identifier", "Value"],
-                            values.iter().map(|value| {
-                                Ok([
-                                    code_span(
-                                        &format!("{identity}.{}", mapping.dsl_for(value)),
-                                        true,
-                                    )?,
-                                    code_span(value, true)?,
-                                ])
-                            }),
-                        )
-                        .with_context(|| {
-                            format!("cannot render enum at attribute `{}`", types.paths[id])
-                        })?;
-                    } else {
-                        page.push_str("This enum's values are not enumerated by the schema.\n\n");
-                    }
+                    let mapping = DslMap::new(dsl_aliases, to_dsl);
+                    page.table(
+                        ["DSL Identifier", "Value"],
+                        values.iter().map(|value| {
+                            [
+                                TableCell::code(format!("{identity}.{}", mapping.dsl_for(value))),
+                                TableCell::code(value),
+                            ]
+                        }),
+                    )
+                    .with_context(|| {
+                        format!("cannot render enum at attribute `{}`", types.paths[id])
+                    })?;
+                    page.push_str("\n");
                 }
-                RawShape::Struct {
+                Definition::Struct {
                     fields,
                     field_groups,
-                    ..
                 } => {
-                    table(
-                        &mut page,
-                        ["Field", "Type", "Required", "Description"],
-                        fields.iter().map(|field| {
+                    let rows = fields
+                        .iter()
+                        .map(|field| {
                             // A definition records declared modes; read-only use sites keep their own mode.
                             let parts = field.parts();
                             let mode = parts.declared_input_mode;
@@ -270,61 +291,63 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                                 details.push(description_text(description));
                             }
                             Ok([
-                                code_span(field.name(), true)?,
-                                types.describe(field.field_type(), true, &mut recursive)?,
-                                if mode.is_required() { "Yes" } else { "No" }.into(),
-                                details.join(" ").replace('\n', " "),
+                                TableCell::code(field.name()),
+                                render_attribute_type(
+                                    field.field_type(),
+                                    &(),
+                                    &mut types,
+                                    &mut registry,
+                                    None,
+                                )?
+                                .table_cell(),
+                                TableCell::text(if mode.is_required() { "Yes" } else { "No" }),
+                                TableCell::text(details.join(" ")),
                             ])
-                        }),
-                    )?;
-                    render_field_groups(&mut page, field_groups)?;
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    page.table(["Field", "Type", "Required", "Description"], rows)?;
+                    page.push_str("\n");
+                    render_field_groups(&mut page, field_groups);
                 }
-                RawShape::Union(members) => {
+                Definition::Union { members } => {
                     page.push_str("A value must match one of these member types.\n\n");
-                    table(
-                        &mut page,
-                        ["Member", "Type"],
-                        members.iter().enumerate().map(|(index, member)| {
+                    let rows = members
+                        .iter()
+                        .enumerate()
+                        .map(|(index, member)| {
                             Ok([
-                                (index + 1).to_string(),
-                                types.describe(member, true, &mut recursive)?,
+                                TableCell::text((index + 1).to_string()),
+                                render_attribute_type(
+                                    member,
+                                    &(),
+                                    &mut types,
+                                    &mut registry,
+                                    None,
+                                )?
+                                .table_cell(),
                             ])
-                        }),
-                    )?;
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    page.table(["Member", "Type"], rows)?;
+                    page.push_str("\n");
                 }
-                _ => unreachable!("only selected declaration kinds"),
             }
         }
     }
-    if !recursive.is_empty() {
-        page.push_str("## Recursive Type Definitions\n\n");
-        for id in recursive.clone() {
-            page.push_str(&format!(
-                "### {}\n\n- **Type:** {}\n\n",
-                code_span(&types.labels[id], false)?,
-                types.describe(types.types[id], false, &mut recursive)?
-            ));
+    if !types.recursive.is_empty() {
+        page.heading(Heading::plain(2, "Recursive Type Definitions"))?;
+        for id in types.recursive.clone() {
+            page.target_heading(
+                TypeTarget::Recursive(id),
+                Heading::code(3, &types.labels[id]),
+            )?;
+            page.push_str("- **Type:** ");
+            render_attribute_type(types.types[id], &(), &mut types, &mut registry, None)?
+                .write_to(&mut page);
+            page.push_str("\n\n");
         }
     }
-    carina_docgen::check_page(&page)?;
-    Ok(page)
-}
-
-fn table<const N: usize>(
-    page: &mut String,
-    headers: [&str; N],
-    rows: impl IntoIterator<Item = Result<[String; N]>>,
-) -> Result<()> {
-    page.push_str(&format!(
-        "| {} |\n| {} |\n",
-        headers.join(" | "),
-        ["---"; N].join(" | ")
-    ));
-    for row in rows {
-        page.push_str(&format!("| {} |\n", row?.join(" | ")));
-    }
-    page.push('\n');
-    Ok(())
+    Ok(page.finish()?)
 }
 
 fn field_metadata(create_only: bool, write_only: bool, identity_mode: IdentityMode) -> Vec<String> {
@@ -346,30 +369,6 @@ fn field_metadata(create_only: bool, write_only: bool, identity_mode: IdentityMo
     metadata
 }
 
-fn render_field_groups(page: &mut String, groups: &[FieldGroup]) -> Result<()> {
-    if groups.is_empty() {
-        return Ok(());
-    }
-    page.push_str("**Field groups:**\n\n");
-    for group in groups {
-        let cardinality = match group.kind() {
-            FieldGroupKind::ExactlyOne => "Exactly one",
-            FieldGroupKind::AtLeastOne => "At least one",
-            FieldGroupKind::AtMostOne => "At most one",
-        };
-        page.push_str(&format!("- {cardinality} of: "));
-        for (index, field) in group.fields().iter().enumerate() {
-            if index > 0 {
-                page.push_str(", ");
-            }
-            page.push_str(&code_span(field, false)?);
-        }
-        page.push_str(".\n");
-    }
-    page.push('\n');
-    Ok(())
-}
-
 /// Traverse owned declarations without expanding Ref edges. Debug preserves the
 /// SDK's declaration metadata; callback addresses distinguish its closure placeholders.
 fn declaration_key(root: &CompiledAttributeType) -> Result<String> {
@@ -377,11 +376,55 @@ fn declaration_key(root: &CompiledAttributeType) -> Result<String> {
     let mut pending = vec![root];
     while let Some(ty) = pending.pop() {
         let validator = match ty.raw_shape() {
-            RawShape::String { validate, .. }
-            | RawShape::Int { validate, .. }
-            | RawShape::Float { validate, .. }
-            | RawShape::Enum { validate, .. } => validate,
-            _ => None,
+            RawShape::String {
+                identity: _identity,
+                pattern: _pattern,
+                length: _length,
+                validate,
+                to_dsl: _to_dsl,
+            } => validate,
+            RawShape::Int {
+                identity: _identity,
+                range: _range,
+                validate,
+            } => validate,
+            RawShape::Float {
+                identity: _identity,
+                range: _range,
+                validate,
+            } => validate,
+            RawShape::Enum {
+                identity: _identity,
+                base: _base,
+                values: _values,
+                dsl_aliases: _dsl_aliases,
+                validate,
+                to_dsl: _to_dsl,
+            } => validate,
+            RawShape::Reference {
+                identity: _identity,
+                pattern: _pattern,
+                length: _length,
+            } => None,
+            RawShape::List {
+                element_type: _element_type,
+                ordered: _ordered,
+                constraints: _constraints,
+            } => None,
+            RawShape::Map {
+                key: _key,
+                value: _value,
+                constraints: _constraints,
+            } => None,
+            RawShape::Struct {
+                name: _name,
+                fields: _fields,
+                field_groups: _field_groups,
+            } => None,
+            RawShape::Bool | RawShape::Duration => None,
+            RawShape::Union(_members) => None,
+            RawShape::Ref(_name) => None,
+            RawShape::UnloadedSchemaType(unloaded) => bail!("unloaded schema type: {unloaded:?}"),
         };
         key.push_str(&format!("{:?};", validator.map(std::sync::Arc::as_ptr)));
         pending.extend(children(ty)?.into_iter().map(|(_, child)| child));
@@ -392,10 +435,29 @@ fn declaration_key(root: &CompiledAttributeType) -> Result<String> {
 fn children(ty: &CompiledAttributeType) -> Result<Vec<(String, &CompiledAttributeType)>> {
     Ok(match ty.raw_shape() {
         RawShape::UnloadedSchemaType(unloaded) => bail!("unloaded schema type: {unloaded:?}"),
-        RawShape::Enum { base, .. } => vec![("base".into(), base)],
-        RawShape::List { element_type, .. } => vec![("item".into(), element_type)],
-        RawShape::Map { key, value, .. } => vec![("key".into(), key), ("value".into(), value)],
-        RawShape::Struct { fields, .. } => fields
+        RawShape::Enum {
+            identity: _identity,
+            base,
+            values: _values,
+            dsl_aliases: _dsl_aliases,
+            validate: _validate,
+            to_dsl: _to_dsl,
+        } => vec![("base".into(), base)],
+        RawShape::List {
+            element_type,
+            ordered: _ordered,
+            constraints: _constraints,
+        } => vec![("item".into(), element_type)],
+        RawShape::Map {
+            key,
+            value,
+            constraints: _constraints,
+        } => vec![("key".into(), key), ("value".into(), value)],
+        RawShape::Struct {
+            name: _name,
+            fields,
+            field_groups: _field_groups,
+        } => fields
             .iter()
             .map(|field| (field.name().into(), field.field_type()))
             .collect(),
@@ -404,27 +466,72 @@ fn children(ty: &CompiledAttributeType) -> Result<Vec<(String, &CompiledAttribut
             .enumerate()
             .map(|(index, member)| (format!("member_{}", index + 1), member))
             .collect(),
-        RawShape::Reference { .. }
-        | RawShape::String { .. }
-        | RawShape::Int { .. }
-        | RawShape::Float { .. }
-        | RawShape::Bool
-        | RawShape::Duration
-        | RawShape::Ref(_) => vec![],
+        RawShape::Reference {
+            identity: _identity,
+            pattern: _pattern,
+            length: _length,
+        } => vec![],
+        RawShape::String {
+            identity: _identity,
+            pattern: _pattern,
+            length: _length,
+            validate: _validate,
+            to_dsl: _to_dsl,
+        } => vec![],
+        RawShape::Int {
+            identity: _identity,
+            range: _range,
+            validate: _validate,
+        } => vec![],
+        RawShape::Float {
+            identity: _identity,
+            range: _range,
+            validate: _validate,
+        } => vec![],
+        RawShape::Bool | RawShape::Duration => vec![],
+        RawShape::Ref(_name) => vec![],
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TypeTarget {
+    Enum(usize),
+    Struct(usize),
+    Union(usize),
+    Recursive(usize),
+}
+
+enum Definition<'a> {
+    Enum {
+        identity: &'a TypeIdentity,
+        base: &'a CompiledAttributeType,
+        values: &'a [String],
+        dsl_aliases: &'a [(String, String)],
+        validate: Option<&'a CustomValidator>,
+        to_dsl: Option<&'a DslTransform>,
+    },
+    Struct {
+        fields: &'a [CompiledStructField],
+        field_groups: &'a [FieldGroup],
+    },
+    Union {
+        members: &'a [CompiledAttributeType],
+    },
+}
+
 struct SchemaTypes<'a> {
-    schema: &'a ValidatedResourceSchema,
+    schema: &'a CompiledResourceSchema,
     types: Vec<&'a CompiledAttributeType>,
     labels: Vec<String>,
     paths: Vec<String>,
     ids: HashMap<*const CompiledAttributeType, usize>,
     declarations: HashMap<String, usize>,
+    definitions: BTreeMap<usize, (TypeTarget, Definition<'a>)>,
+    recursive: BTreeSet<usize>,
 }
 
 impl<'a> SchemaTypes<'a> {
-    fn collect(schema: &'a ValidatedResourceSchema) -> Result<Self> {
+    fn collect(schema: &'a CompiledResourceSchema) -> Result<Self> {
         let mut types = Self {
             schema,
             types: Vec::new(),
@@ -432,8 +539,10 @@ impl<'a> SchemaTypes<'a> {
             paths: Vec::new(),
             ids: HashMap::new(),
             declarations: HashMap::new(),
+            definitions: BTreeMap::new(),
+            recursive: BTreeSet::new(),
         };
-        let resource = schema.as_schema();
+        let resource = schema;
         for attribute in resource.attributes().values() {
             types.intern(attribute.attr_type(), attribute.name().into())?;
         }
@@ -468,12 +577,57 @@ impl<'a> SchemaTypes<'a> {
         )));
         for (id, ty) in types.types.iter().enumerate() {
             let name = match ty.raw_shape() {
-                RawShape::Enum { identity, .. } => identity.to_string(),
-                RawShape::Struct { name, .. } => name.to_string(),
-                RawShape::Union(_) | RawShape::List { .. } | RawShape::Map { .. } => {
-                    types.paths[id].clone()
+                RawShape::Enum {
+                    identity,
+                    base: _base,
+                    values: _values,
+                    dsl_aliases: _dsl_aliases,
+                    validate: _validate,
+                    to_dsl: _to_dsl,
+                } => identity.to_string(),
+                RawShape::Struct {
+                    name,
+                    fields: _fields,
+                    field_groups: _field_groups,
+                } => name.to_string(),
+                RawShape::List {
+                    element_type: _element_type,
+                    ordered: _ordered,
+                    constraints: _constraints,
+                } => types.paths[id].clone(),
+                RawShape::Map {
+                    key: _key,
+                    value: _value,
+                    constraints: _constraints,
+                } => types.paths[id].clone(),
+                RawShape::Union(_members) => types.paths[id].clone(),
+                RawShape::Reference {
+                    identity: _identity,
+                    pattern: _pattern,
+                    length: _length,
+                } => continue,
+                RawShape::String {
+                    identity: _identity,
+                    pattern: _pattern,
+                    length: _length,
+                    validate: _validate,
+                    to_dsl: _to_dsl,
+                } => continue,
+                RawShape::Int {
+                    identity: _identity,
+                    range: _range,
+                    validate: _validate,
+                } => continue,
+                RawShape::Float {
+                    identity: _identity,
+                    range: _range,
+                    validate: _validate,
+                } => continue,
+                RawShape::Bool | RawShape::Duration => continue,
+                RawShape::Ref(_name) => continue,
+                RawShape::UnloadedSchemaType(unloaded) => {
+                    bail!("unloaded schema type: {unloaded:?}")
                 }
-                _ => continue,
             };
             let mut label = name.clone();
             let mut suffix = 2;
@@ -496,7 +650,6 @@ impl<'a> SchemaTypes<'a> {
             }
             ty = self
                 .schema
-                .as_schema()
                 .defs()
                 .get(name)
                 .with_context(|| format!("missing schema definition: {name}"))?;
@@ -529,156 +682,82 @@ impl<'a> SchemaTypes<'a> {
             .copied()
             .context("schema type was not collected")
     }
-    fn link(&self, id: usize, prefix: &str, table: bool) -> String {
-        let label = if prefix.is_empty() {
-            self.labels[id].clone()
-        } else {
-            format!("{prefix}({})", self.labels[id])
-        };
-        let label = label.replace('[', r"\[").replace(']', r"\]");
-        let label = if table {
-            label.replace('|', r"\|")
-        } else {
-            label
-        };
-        format!(
-            "[{label}](#{})",
-            carina_docgen::heading_slug(&self.labels[id])
-        )
-    }
-    fn describe(
-        &self,
-        ty: &'a CompiledAttributeType,
-        table: bool,
-        recursive: &mut BTreeSet<usize>,
-    ) -> Result<String> {
-        let id = self.id(ty)?;
-        self.type_text(id, table, &mut Vec::new(), recursive)
-            .with_context(|| format!("cannot render type at attribute `{}`", self.paths[id]))
-    }
-    fn type_text(
-        &self,
-        id: usize,
-        table: bool,
-        active: &mut Vec<usize>,
-        recursive: &mut BTreeSet<usize>,
-    ) -> Result<String> {
-        if active.contains(&id) {
-            recursive.insert(id);
-            return Ok(self.link(id, "Recursive type ", table));
-        }
-        if active.len() >= 64 {
-            bail!(
-                "type nesting exceeds documentation limit at {}",
-                self.paths[id]
-            );
-        }
-        active.push(id);
-        let nested = |ty, active: &mut Vec<usize>, recursive: &mut BTreeSet<usize>| {
-            self.type_text(self.id(ty)?, table, active, recursive)
-        };
-        let scalar = |name: String, constraints: Vec<String>| {
-            code_span(
-                &if constraints.is_empty() {
-                    name
-                } else {
-                    format!("{name} ({})", constraints.join(", "))
-                },
-                table,
-            )
-        };
-        let text = match self.types[id].raw_shape() {
-            RawShape::Reference {
-                identity,
-                pattern,
-                length,
-            } => scalar(identity.to_string(), string_constraints(pattern, length))?,
-            RawShape::String {
-                identity,
-                pattern,
-                length,
-                validate,
-                to_dsl,
-            } => {
-                let mut constraints = string_constraints(pattern, length);
-                if validate.is_some() {
-                    constraints.push("custom validator".into());
-                }
-                if let Some(transform) = to_dsl {
-                    constraints.push(format!("DSL transform: {transform:?}"));
-                }
-                scalar(
-                    identity.map_or_else(|| "String".into(), ToString::to_string),
-                    constraints,
-                )?
-            }
-            RawShape::Int {
-                identity,
-                range,
-                validate,
-            } => scalar(
-                identity.map_or_else(|| "Int".into(), ToString::to_string),
-                number_constraints(range, validate.is_some()),
-            )?,
-            RawShape::Float {
-                identity,
-                range,
-                validate,
-            } => scalar(
-                identity.map_or_else(|| "Float".into(), ToString::to_string),
-                number_constraints(range, validate.is_some()),
-            )?,
-            RawShape::Bool => scalar("Bool".into(), vec![])?,
-            RawShape::Duration => scalar("Duration".into(), vec![])?,
-            RawShape::Enum { .. } => self.link(id, "", table),
-            RawShape::Struct { .. } => self.link(id, "Struct", table),
-            RawShape::Union(_) => self.link(id, "Union", table),
-            RawShape::List {
-                element_type,
-                ordered,
-                constraints,
-            } => {
-                let mut refinements = Vec::new();
-                if let Some(length) = constraints.length() {
-                    refinements.push(format!("items: {}", bounds(length)));
-                }
-                if constraints.elements() == ListElements::Unique {
-                    refinements.push("unique items".into());
-                }
-                refinements.push(if ordered { "ordered" } else { "unordered" }.into());
-                format!(
-                    "List\\<{}\\> ({})",
-                    nested(element_type, active, recursive)?,
-                    refinements.join(", ")
-                )
-            }
-            // Map entry bounds are not rendered here: this local renderer is
-            // slated for replacement by carina-docgen (carina-rs/carina-provider-github#20).
-            RawShape::Map { key, value, .. } => format!(
-                "Map\\<{}, {}\\>",
-                nested(key, active, recursive)?,
-                nested(value, active, recursive)?
-            ),
-            RawShape::UnloadedSchemaType(unloaded) => bail!("unloaded schema type: {unloaded:?}"),
-            RawShape::Ref(_) => unreachable!("intern resolves aliases"),
-        };
-        active.pop();
-        Ok(text)
-    }
 }
 
-fn number_constraints<T: Display>(
-    range: Option<(Option<T>, Option<T>)>,
-    validate: bool,
-) -> Vec<String> {
-    let mut constraints = Vec::new();
-    if let Some(range) = range {
-        constraints.push(format!("range: {}", bounds(range)));
+impl<'a> TypeDocHooks<'a, Compiled> for SchemaTypes<'a> {
+    type NodeId = usize;
+    type Target = TypeTarget;
+    // Paths and labels are allocated during interning, before shared traversal.
+    type Scope = ();
+
+    fn resolve(&self, ty: &'a CompiledAttributeType) -> Result<Resolved<'a, Compiled, usize>> {
+        let id = self.id(ty)?;
+        // Use canonical children as well as canonical IDs: equivalent cloned
+        // declarations need not have independently interned child addresses.
+        Ok(Resolved {
+            id,
+            ty: self.types[id],
+        })
     }
-    if validate {
-        constraints.push("custom validator".into());
+
+    fn scalar_name(&self, identity: &TypeIdentity) -> String {
+        identity.to_string()
     }
-    constraints
+
+    fn child_scope(&self, _parent: &(), _edge: TypeEdge<'_>) {}
+
+    fn register(
+        &mut self,
+        _scope: &(),
+        declaration: Declaration<'a, Compiled, usize>,
+    ) -> Result<DocLink<TypeTarget>> {
+        let id = declaration.id;
+        let (target, definition) = match declaration.kind {
+            DeclarationKind::Enum {
+                identity,
+                base,
+                values,
+                dsl_aliases,
+                validate,
+                to_dsl,
+            } => (
+                TypeTarget::Enum(id),
+                Some(Definition::Enum {
+                    identity,
+                    base,
+                    values,
+                    dsl_aliases,
+                    validate,
+                    to_dsl,
+                }),
+            ),
+            DeclarationKind::Struct {
+                name: _name,
+                fields,
+                field_groups,
+            } => (
+                TypeTarget::Struct(id),
+                Some(Definition::Struct {
+                    fields,
+                    field_groups,
+                }),
+            ),
+            DeclarationKind::Union { members } => {
+                (TypeTarget::Union(id), Some(Definition::Union { members }))
+            }
+            DeclarationKind::Recursive => {
+                self.recursive.insert(id);
+                (TypeTarget::Recursive(id), None)
+            }
+        };
+        if let Some(definition) = definition {
+            self.definitions.insert(id, (target, definition));
+        }
+        Ok(DocLink {
+            target,
+            label: self.labels[id].clone(),
+        })
+    }
 }
 
 /// Preserve provider-authored Markdown without introducing ATX headings.
@@ -702,68 +781,4 @@ fn description_text(description: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn bounds<T: Display>((min, max): (Option<T>, Option<T>)) -> String {
-    format!(
-        "{}..{}",
-        min.map(|value| value.to_string()).unwrap_or_default(),
-        max.map(|value| format!("={value}")).unwrap_or_default()
-    )
-}
-
-fn string_constraints(
-    pattern: Option<&str>,
-    length: Option<(Option<u64>, Option<u64>)>,
-) -> Vec<String> {
-    let mut constraints = Vec::new();
-    if let Some(pattern) = pattern {
-        constraints.push(format!("pattern: {pattern}"));
-    }
-    if let Some(length) = length {
-        constraints.push(format!("len: {}", bounds(length)));
-    }
-    constraints
-}
-
-/// Literals retain their spelling in code spans. GFM removes the pipe escape
-/// from table cells; controls must be visible because Markdown normalizes them.
-fn code_span(literal: &str, table: bool) -> Result<String> {
-    if literal.is_empty() {
-        bail!("empty literal cannot be represented by a Markdown code span");
-    }
-    let mut code = String::new();
-    let mut backslashes = 0;
-    for character in literal.chars() {
-        match character {
-            '\n' => code.push_str(r"\n"),
-            '\t' => code.push_str(r"\t"),
-            c if c.is_control() => code.extend(c.escape_unicode()),
-            '|' if table => {
-                // GFM cannot round-trip a pipe preceded by an odd backslash run.
-                if backslashes % 2 == 1 {
-                    bail!("literal cannot round-trip in a GFM table cell: {literal:?}");
-                }
-                code.push_str(r"\|");
-            }
-            c => code.push(c),
-        }
-        backslashes = if character == '\\' {
-            backslashes + 1
-        } else {
-            0
-        };
-    }
-    let fence = "`".repeat(code.split(|c| c != '`').map(str::len).max().unwrap_or(0) + 1);
-    let padding = if code.starts_with('`')
-        || code.ends_with('`')
-        || (code.starts_with(' ') && code.ends_with(' ') && !code.chars().all(|c| c == ' '))
-    {
-        " "
-    } else {
-        ""
-    };
-    let span = format!("{fence}{padding}{code}{padding}{fence}");
-    carina_docgen::check_page(&span).context("literal rejected by carina-docgen")?;
-    Ok(span)
 }

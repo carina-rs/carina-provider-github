@@ -48,7 +48,7 @@ Whether the repository uses GitHub's default subject; derived from whether claim
 - **Base type:** `String`
 
 | DSL Identifier | Value |
-| --- | --- |
+|----------------|-------|
 | `github.actions.OidcSubject.ClaimKey.repo` | `repo` |
 | `github.actions.OidcSubject.ClaimKey.context` | `context` |
 | `github.actions.OidcSubject.ClaimKey.actor` | `actor` |

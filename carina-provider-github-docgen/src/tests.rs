@@ -2,7 +2,8 @@ use super::*;
 use carina_plugin_sdk::core::FiniteF64;
 use carina_plugin_sdk::core::resource::{ConcreteValue, Value};
 use carina_plugin_sdk::core::schema::{
-    AttributeSchema, AttributeType, DslTransform, ResourceSchema, StructField, TypeIdentity,
+    AttributeSchema, AttributeType, CompiledAttributeSchema, DslTransform, FieldGroup,
+    FieldGroupKind, ResourceSchema, StructField, TypeIdentity,
 };
 use comrak::nodes::NodeValue;
 
@@ -19,6 +20,26 @@ fn rendered_code(markdown: &str) -> Vec<String> {
         .collect()
 }
 
+fn rendered_paragraphs(markdown: &str) -> Vec<String> {
+    let arena = comrak::Arena::new();
+    let mut options = comrak::Options::default();
+    options.extension.table = true;
+    comrak::parse_document(&arena, markdown, &options)
+        .descendants()
+        .filter(|node| matches!(node.data.borrow().value, NodeValue::Paragraph))
+        .map(|paragraph| {
+            paragraph
+                .descendants()
+                .filter_map(|node| match &node.data.borrow().value {
+                    NodeValue::Text(text) => Some(text.to_string()),
+                    NodeValue::Code(code) => Some(code.literal.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn choice(name: &str, values: &[&str]) -> AttributeType {
     AttributeType::enum_(
         TypeIdentity::bare(name),
@@ -31,6 +52,29 @@ fn choice(name: &str, values: &[&str]) -> AttributeType {
 
 fn page(schema: ResourceSchema) -> String {
     render_page(&schema.validate().unwrap(), None).unwrap()
+}
+
+fn page_with_closed_enum(
+    schema: ResourceSchema,
+    literal: &str,
+    transform: &DslTransform,
+) -> String {
+    // The current protocol rejects closed-enum transforms during admission.
+    // Add this compiled fixture afterwards to exercise definition rendering.
+    let schema = schema.validate().unwrap().as_schema().clone().attribute(
+        CompiledAttributeSchema::optional(
+            "closed_transform",
+            CompiledAttributeType::enum_(
+                TypeIdentity::new(Some("github"), ["test", "Literals"], "ClosedTransformed"),
+                Some(vec![format!("value{literal}")]),
+                vec![],
+                Some(std::sync::Arc::new(|_| Ok(()))),
+                Some(transform.clone()),
+            ),
+        )
+        .build(),
+    );
+    render_schema_page(&schema, None).unwrap()
 }
 
 fn input(name: impl Into<String>, ty: AttributeType) -> AttributeSchema {
@@ -66,27 +110,42 @@ fn literals_round_trip_as_parsed_text_inline_and_in_tables() {
             r"first\nsecond\tthird\u{d}\u{0}\u{1}\u{b}\u{1f}",
         ),
     ] {
-        let mut markdown = format!("# Literal\n\n{}\n\n", code_span(literal, false).unwrap());
-        table(
-            &mut markdown,
-            ["Literal"],
-            [Ok([code_span(literal, true).unwrap()])],
-        )
-        .unwrap();
+        let mut markdown = PageBuilder::<()>::new();
+        markdown.heading(Heading::plain(1, "Literal")).unwrap();
+        markdown.inline(TableCell::code(literal));
+        markdown.push_str("\n\n");
+        markdown
+            .table(["Literal"], [[TableCell::code(literal)]])
+            .unwrap();
+        let markdown = markdown.finish().unwrap();
         assert_eq!(rendered_code(&markdown), [expected, expected], "{markdown}");
         carina_docgen::check_page(&markdown).unwrap();
     }
-    assert_eq!(code_span("`a``b`", false).unwrap(), "``` `a``b` ```");
-    assert_eq!(code_span("a|b", false).unwrap(), "`a|b`");
-    assert_eq!(code_span("a|b", true).unwrap(), r"`a\|b`");
-    assert_eq!(rendered_code(&code_span(r"\|", false).unwrap()), [r"\|"]);
-    assert!(
-        code_span(r"\|", true)
-            .unwrap_err()
-            .to_string()
-            .contains("cannot round-trip")
-    );
-    assert!(code_span("", false).is_err());
+    let mut inline = PageBuilder::<()>::new();
+    inline.inline(TableCell::code("`a``b`"));
+    inline.push_str("\n\n");
+    inline.inline(TableCell::code("a|b"));
+    inline.push_str("\n\n");
+    inline.inline(TableCell::code(r"\|"));
+    let inline = inline.finish().unwrap();
+    assert_eq!(inline, "``` `a``b` ```\n\n`a|b`\n\n`\\|`");
+    assert_eq!(rendered_code(&inline), ["`a``b`", "a|b", r"\|"]);
+    let mut table = PageBuilder::<()>::new();
+    table
+        .table(
+            ["Literal"],
+            [[TableCell::code("a|b")], [TableCell::code(r"\|")]],
+        )
+        .unwrap();
+    let table = table.finish().unwrap();
+    assert!(table.contains(r"`a\|b`"));
+    // The shared renderer preserves this literal by splitting it into adjacent
+    // code spans instead of rejecting the odd backslash run before the pipe.
+    assert_eq!(rendered_code(&table), ["a|b", r"\", "|"]);
+    let mut invalid = PageBuilder::<()>::new();
+    invalid.inline(TableCell::code(""));
+    let error = invalid.finish().unwrap_err();
+    assert!(format!("{error:#}").contains("cannot render inline code literal"));
 }
 
 #[test]
@@ -124,77 +183,104 @@ fn schema_patterns_defaults_enum_values_and_transforms_keep_their_spelling() {
                 Some(transform.clone()),
             ),
         ));
-    let page = page(schema);
+    let page = page_with_closed_enum(schema, literal, &transform);
     let code = rendered_code(&page);
     for expected in [
         literal.to_string(),
         format_value(&default),
-        format!("{transform:?}"),
+        format!("github.test.Literals.Transformed (DSL transform: {transform:?})"),
         format!("String (pattern: ^[a-z|`]+$, DSL transform: {transform:?})"),
+        format!("{transform:?}"),
+        "github.test.Literals.ClosedTransformed.value".into(),
+        format!("value{literal}"),
     ] {
         assert!(code.contains(&expected), "missing {expected:?}: {page}");
     }
     assert!(page.contains("pattern: ^[a-z|`]+$"));
     assert!(page.contains(r"pattern: ^[a-z\|`]+$"));
     assert!(!page.contains("\\u{5b}"));
+    let paragraphs = rendered_paragraphs(&page);
+    assert!(
+        paragraphs.contains(&"Values are also checked by a custom validator.".into()),
+        "{page}"
+    );
+    assert!(
+        paragraphs.contains(&format!("DSL transform: {transform:?}.")),
+        "{page}"
+    );
 }
 
 #[test]
 fn link_shaped_literals_round_trip_as_code() {
-    let literal = "^[a](b)$";
-    let pattern = format!("String (pattern: {literal})");
-    let default = Value::Concrete(ConcreteValue::String(literal.into()));
-    let transform = DslTransform::StripSuffix(literal.into());
-    for (attribute, expected) in [
-        (
-            input(
-                "pattern",
-                AttributeType::refined_string(None, Some(literal.into()), None, None),
-            ),
-            pattern.clone(),
-        ),
-        (
-            AttributeSchema::optional("default", AttributeType::string())
-                .with_default(default.clone())
-                .build(),
-            format_value(&default),
-        ),
-        (
-            input("enum_value", choice("Choice", &[literal])),
-            literal.to_string(),
-        ),
-        (
-            input(
-                "transform",
-                AttributeType::enum_(
-                    TypeIdentity::new(Some("github"), ["test", "Literals"], "Transformed"),
-                    None,
-                    vec![],
-                    None,
-                    Some(transform.clone()),
+    for literal in ["^[a](b)$", "a|b", "`a``b`"] {
+        let pattern = format!("String (pattern: {literal})");
+        let default = Value::Concrete(ConcreteValue::String(literal.into()));
+        let transform = DslTransform::StripSuffix(literal.into());
+        for (attribute, expected) in [
+            (
+                input(
+                    "pattern",
+                    AttributeType::refined_string(None, Some(literal.into()), None, None),
                 ),
+                pattern.clone(),
             ),
-            format!("{transform:?}"),
-        ),
-        (
-            input(
-                "nested",
-                AttributeType::struct_(
-                    "Settings",
-                    vec![field(
-                        "pattern",
-                        AttributeType::refined_string(None, Some(literal.into()), None, None),
-                    )],
+            (
+                AttributeSchema::optional("default", AttributeType::string())
+                    .with_default(default.clone())
+                    .build(),
+                format_value(&default),
+            ),
+            (
+                input("enum_value", choice("Choice", &[literal])),
+                literal.to_string(),
+            ),
+            (
+                input(
+                    "transform",
+                    AttributeType::enum_(
+                        TypeIdentity::new(Some("github"), ["test", "Literals"], "Transformed"),
+                        None,
+                        vec![],
+                        None,
+                        Some(transform.clone()),
+                    ),
                 ),
+                format!("github.test.Literals.Transformed (DSL transform: {transform:?})"),
             ),
-            pattern,
-        ),
-    ] {
-        let name = attribute.name().to_string();
-        let page = page(ResourceSchema::new("test.Literals").attribute(attribute));
+            (
+                input(
+                    "nested",
+                    AttributeType::struct_(
+                        "Settings",
+                        vec![field(
+                            "pattern",
+                            AttributeType::refined_string(None, Some(literal.into()), None, None),
+                        )],
+                    ),
+                ),
+                pattern,
+            ),
+        ] {
+            let name = attribute.name().to_string();
+            let page = page(ResourceSchema::new("test.Literals").attribute(attribute));
+            assert!(
+                rendered_code(&page).contains(&expected),
+                "attribute `{name}` lost literal {expected:?}: {page}"
+            );
+        }
+        let page = page_with_closed_enum(ResourceSchema::new("test.Literals"), literal, &transform);
         assert!(
-            rendered_code(&page).contains(&expected),
-            "attribute `{name}` lost literal {expected:?}: {page}"
+            rendered_code(&page).contains(&format!("{transform:?}")),
+            "{page}"
+        );
+        let paragraphs = rendered_paragraphs(&page);
+        assert!(
+            paragraphs.contains(&"Values are also checked by a custom validator.".into()),
+            "{page}"
+        );
+        assert!(
+            paragraphs.contains(&format!("DSL transform: {transform:?}.")),
+            "{page}"
         );
     }
 }
@@ -208,8 +294,11 @@ fn real_oidc_subject_page_matches_the_schema_and_registry_shape() {
     let schemas = resource_schemas();
     let resource = schemas[0].as_schema();
     let RawShape::String {
+        identity: _identity,
         pattern: Some(pattern),
-        ..
+        length: _length,
+        validate: _validate,
+        to_dsl: _to_dsl,
     } = resource.attributes()["repository"].attr_type().raw_shape()
     else {
         panic!("repository must declare its pattern")
@@ -421,6 +510,91 @@ fn field_groups_render_at_resource_and_struct_levels() {
                 .count(),
             2
         );
+    }
+}
+
+#[test]
+fn map_entry_bounds_render_in_attributes_and_definition_tables() {
+    let bounded = AttributeType::refined_map(
+        AttributeType::string(),
+        AttributeType::int(),
+        Some((Some(2), Some(5))),
+    );
+    let page = page(
+        ResourceSchema::new("test.MapBounds")
+            .attribute(input("entries", bounded.clone()))
+            .attribute(output("observed", bounded.clone()))
+            .with_def("Entries", bounded.clone())
+            .with_def(
+                "Settings",
+                AttributeType::struct_("Settings", vec![field("entries", bounded)]),
+            ),
+    );
+    let expected = r"Map\<`String`, `Int`\> (entries: 2..=5)";
+    assert!(page.contains(&format!("### `entries`\n\n- **Type:** {expected}\n")));
+    assert!(page.contains(&format!("### `observed`\n\n- **Type:** {expected}\n")));
+    assert!(page.contains(&format!("| `Entries` | {expected} |")));
+    assert!(page.contains(&format!("| `entries` | {expected} | No |  |")));
+}
+
+#[test]
+fn open_enum_attributes_render_as_scalar_names_without_declarations() {
+    let transform = DslTransform::StripSuffix("suffix".into());
+    let page = page(ResourceSchema::new("test.OpenEnum").attribute(input(
+        "value",
+        AttributeType::enum_(
+            TypeIdentity::new(Some("github"), ["x"], "Y"),
+            None,
+            vec![],
+            Some(std::sync::Arc::new(|_| Ok(()))),
+            Some(transform.clone()),
+        ),
+    )));
+    assert!(page.contains(&format!(
+        "### `value`\n\n- **Type:** `github.x.Y (custom validator, DSL transform: {transform:?})`\n"
+    )));
+    assert!(!page.contains("## Enum Values"));
+    assert!(!page.contains("### `github.x.Y`"));
+}
+
+#[test]
+fn render_errors_include_the_attribute_path_and_source() {
+    let nested = (0..65).fold(AttributeType::string(), |ty, _| AttributeType::list(ty));
+    for (schema, path) in [
+        (
+            ResourceSchema::new("test.RenderError").attribute(input("deep", nested.clone())),
+            "deep",
+        ),
+        (
+            ResourceSchema::new("test.RenderError").with_def("Deep", nested.clone()),
+            "Deep",
+        ),
+        (
+            ResourceSchema::new("test.RenderError").attribute(input(
+                "settings",
+                AttributeType::struct_("Settings", vec![field("entries", nested.clone())]),
+            )),
+            "settings.entries",
+        ),
+        (
+            ResourceSchema::new("test.RenderError").attribute(input(
+                "choice",
+                AttributeType::union(vec![AttributeType::bool(), nested]),
+            )),
+            "choice.member_2",
+        ),
+    ] {
+        let error = render_page(&schema.validate().unwrap(), None).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!("cannot render type at attribute `{path}`")),
+            "{message}"
+        );
+        assert!(
+            message.contains("type nesting exceeds documentation limit (64)"),
+            "{message}"
+        );
+        assert!(error.source().is_some(), "{message}");
     }
 }
 
