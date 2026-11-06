@@ -198,7 +198,7 @@ dependencies = [
 [[package]]
 name = "carina-docgen"
 version = "0.9.0"
-source = "git+https://github.com/carina-rs/carina-provider-aws?rev=3e3e90fc263115d38b69472c673e6c828b55fd32#3e3e90fc263115d38b69472c673e6c828b55fd32"
+source = "git+https://github.com/carina-rs/carina-provider-aws?rev=e700362223707311481ef26276cf94a8cec7e2c8#e700362223707311481ef26276cf94a8cec7e2c8"
 dependencies = [
  "anyhow",
  "carina-core",

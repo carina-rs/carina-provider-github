@@ -11,4 +11,4 @@ version = "0.1.0"
 
 [workspace.dependencies]
 carina-plugin-sdk = { git = "https://github.com/carina-rs/carina", rev = "4311557b6f2408ab3108151a931fcf418f72fbb5" }
-carina-docgen = { git = "https://github.com/carina-rs/carina-provider-aws", rev = "3e3e90fc263115d38b69472c673e6c828b55fd32" }
+carina-docgen = { git = "https://github.com/carina-rs/carina-provider-aws", rev = "e700362223707311481ef26276cf94a8cec7e2c8" }

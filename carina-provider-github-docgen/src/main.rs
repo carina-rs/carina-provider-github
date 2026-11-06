@@ -117,35 +117,8 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
     // intern order even when a type is only used by a later definition.
     for id in 0..types.types.len() {
         let ty = types.types[id];
-        render_attribute_type(ty, &(), &mut types, &mut registry, None)?;
-        if let RawShape::Enum {
-            identity,
-            base,
-            values: None,
-            dsl_aliases,
-            validate,
-            to_dsl,
-        } = ty.raw_shape()
-        {
-            // The shared renderer displays open enums as scalars. Keep their
-            // existing definition sections, including validator/transform prose.
-            types.register(
-                &(),
-                Declaration {
-                    id,
-                    ty,
-                    kind: DeclarationKind::Enum {
-                        identity,
-                        base,
-                        values: &[],
-                        dsl_aliases,
-                        validate,
-                        to_dsl,
-                    },
-                },
-            )?;
-            types.open_enums.insert(id);
-        }
+        render_attribute_type(ty, &(), &mut types, &mut registry, None)
+            .with_context(|| format!("cannot render type at attribute `{}`", types.paths[id]))?;
     }
     let mut page = PageBuilder::new();
     page.heading(Heading::plain(
@@ -156,9 +129,11 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
         page.push_str(&format!("{}\n\n", description_text(description)));
     }
     if resource.prevents_destroy_by_default() {
-        page.push_str("Destruction protection is enabled by default. To opt out, set ");
-        page.push_str(&inline_code("directives { prevent_destroy = false }")?);
-        page.push_str(".\n\n");
+        let mut protection =
+            TableCell::text("Destruction protection is enabled by default. To opt out, set ");
+        protection.push_code("directives { prevent_destroy = false }");
+        protection.push_text(".\n\n");
+        page.inline(protection);
     }
     if let Some(example) = example {
         let text = example.text_for(PROVIDER, resource.resource_type(), ExampleKind::Resource)?;
@@ -191,9 +166,9 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                     if attribute.is_required() { "Yes" } else { "No" }
                 ));
                 if let Some(default) = attribute.default_value() {
-                    let code = inline_code(&format_value(default))
-                        .with_context(|| format!("cannot render default of attribute `{name}`"))?;
-                    page.push_str(&format!("- **Default:** {code}\n"));
+                    page.push_str("- **Default:** ");
+                    page.inline(TableCell::code(format_value(default)));
+                    page.push_str("\n");
                 }
                 for metadata in field_metadata(
                     attribute.is_create_only(),
@@ -217,31 +192,38 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
             .map(|(name, ty)| {
                 Ok([
                     TableCell::code(name),
-                    render_attribute_type(ty, &(), &mut types, &mut registry, None)?.table_cell(),
+                    render_attribute_type(ty, &(), &mut types, &mut registry, None)
+                        .with_context(|| format!("cannot render type at attribute `{name}`"))?
+                        .table_cell(),
                 ])
             })
             .collect::<Result<Vec<_>>>()?;
         page.table(["Name", "Type"], rows)?;
         page.push_str("\n");
     }
-    for section in ["Enum Values", "Struct Definitions", "Union Definitions"] {
-        let mut started = false;
-        for id in 0..types.types.len() {
-            let target = match (section, types.definitions.get(&id)) {
-                ("Enum Values", Some(DeclarationKind::Enum { .. })) => TypeTarget::Enum(id),
-                ("Struct Definitions", Some(DeclarationKind::Struct { .. })) => {
-                    TypeTarget::Struct(id)
-                }
-                ("Union Definitions", Some(DeclarationKind::Union { .. })) => TypeTarget::Union(id),
-                _ => continue,
-            };
-            let Some(definition) = types.definitions.remove(&id) else {
-                continue;
-            };
-            if !started {
-                page.heading(Heading::plain(2, section))?;
-                started = true;
-            }
+    let mut sections = [
+        ("Enum Values", Vec::new()),
+        ("Struct Definitions", Vec::new()),
+        ("Union Definitions", Vec::new()),
+    ];
+    for id in 0..types.types.len() {
+        let Some(definition) = types.definitions.remove(&id) else {
+            continue;
+        };
+        let (section, target) = match &definition {
+            DeclarationKind::Enum { .. } => (0, TypeTarget::Enum(id)),
+            DeclarationKind::Struct { .. } => (1, TypeTarget::Struct(id)),
+            DeclarationKind::Union { .. } => (2, TypeTarget::Union(id)),
+            DeclarationKind::Recursive => unreachable!("recursive definitions are separate"),
+        };
+        sections[section].1.push((id, target, definition));
+    }
+    for (section, definitions) in sections {
+        if definitions.is_empty() {
+            continue;
+        }
+        page.heading(Heading::plain(2, section))?;
+        for (id, target, definition) in definitions {
             page.target_heading(target, Heading::code(3, &types.labels[id]))?;
             match definition {
                 DeclarationKind::Enum {
@@ -253,39 +235,35 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                     to_dsl,
                 } => {
                     page.push_str("- **Base type:** ");
-                    render_attribute_type(base, &(), &mut types, &mut registry, None)?
+                    render_attribute_type(base, &(), &mut types, &mut registry, None)
+                        .with_context(|| {
+                            format!("cannot render type at attribute `{}.base`", types.paths[id])
+                        })?
                         .write_to(&mut page);
                     page.push_str("\n\n");
                     if validate.is_some() {
                         page.push_str("Values are also checked by a custom validator.\n\n");
                     }
                     if let Some(transform) = to_dsl {
-                        let code = inline_code(&format!("{transform:?}")).with_context(|| {
-                            format!("cannot render transform at attribute `{}`", types.paths[id])
-                        })?;
-                        page.push_str(&format!("DSL transform: {code}.\n\n"));
+                        let mut transform_prose = TableCell::text("DSL transform: ");
+                        transform_prose.push_code(format!("{transform:?}"));
+                        transform_prose.push_text(".\n\n");
+                        page.inline(transform_prose);
                     }
-                    if !types.open_enums.contains(&id) {
-                        let mapping = DslMap::new(dsl_aliases, to_dsl);
-                        page.table(
-                            ["DSL Identifier", "Value"],
-                            values.iter().map(|value| {
-                                [
-                                    TableCell::code(format!(
-                                        "{identity}.{}",
-                                        mapping.dsl_for(value)
-                                    )),
-                                    TableCell::code(value),
-                                ]
-                            }),
-                        )
-                        .with_context(|| {
-                            format!("cannot render enum at attribute `{}`", types.paths[id])
-                        })?;
-                        page.push_str("\n");
-                    } else {
-                        page.push_str("This enum's values are not enumerated by the schema.\n\n");
-                    }
+                    let mapping = DslMap::new(dsl_aliases, to_dsl);
+                    page.table(
+                        ["DSL Identifier", "Value"],
+                        values.iter().map(|value| {
+                            [
+                                TableCell::code(format!("{identity}.{}", mapping.dsl_for(value))),
+                                TableCell::code(value),
+                            ]
+                        }),
+                    )
+                    .with_context(|| {
+                        format!("cannot render enum at attribute `{}`", types.paths[id])
+                    })?;
+                    page.push_str("\n");
                 }
                 DeclarationKind::Struct {
                     fields,
@@ -320,7 +298,14 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                                     &mut types,
                                     &mut registry,
                                     None,
-                                )?
+                                )
+                                .with_context(|| {
+                                    format!(
+                                        "cannot render type at attribute `{}.{}`",
+                                        types.paths[id],
+                                        field.name()
+                                    )
+                                })?
                                 .table_cell(),
                                 TableCell::text(if mode.is_required() { "Yes" } else { "No" }),
                                 TableCell::text(details.join(" ")),
@@ -339,14 +324,15 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                         .map(|(index, member)| {
                             Ok([
                                 TableCell::text((index + 1).to_string()),
-                                render_attribute_type(
-                                    member,
-                                    &(),
-                                    &mut types,
-                                    &mut registry,
-                                    None,
-                                )?
-                                .table_cell(),
+                                render_attribute_type(member, &(), &mut types, &mut registry, None)
+                                    .with_context(|| {
+                                        format!(
+                                            "cannot render type at attribute `{}.member_{}`",
+                                            types.paths[id],
+                                            index + 1
+                                        )
+                                    })?
+                                    .table_cell(),
                             ])
                         })
                         .collect::<Result<Vec<_>>>()?;
@@ -365,7 +351,8 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                 Heading::code(3, &types.labels[id]),
             )?;
             page.push_str("- **Type:** ");
-            render_attribute_type(types.types[id], &(), &mut types, &mut registry, None)?
+            render_attribute_type(types.types[id], &(), &mut types, &mut registry, None)
+                .with_context(|| format!("cannot render type at attribute `{}`", types.paths[id]))?
                 .write_to(&mut page);
             page.push_str("\n\n");
         }
@@ -532,7 +519,6 @@ struct SchemaTypes<'a> {
     ids: HashMap<*const CompiledAttributeType, usize>,
     declarations: HashMap<String, usize>,
     definitions: BTreeMap<usize, DeclarationKind<'a, Compiled>>,
-    open_enums: BTreeSet<usize>,
     recursive: BTreeSet<usize>,
 }
 
@@ -546,7 +532,6 @@ impl<'a> SchemaTypes<'a> {
             ids: HashMap::new(),
             declarations: HashMap::new(),
             definitions: BTreeMap::new(),
-            open_enums: BTreeSet::new(),
             recursive: BTreeSet::new(),
         };
         let resource = schema.as_schema();
@@ -759,18 +744,4 @@ fn description_text(description: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// The shared builder exposes code literals through headings and table cells.
-/// Use its code heading for standalone inline literals too, stripping only the
-/// heading wrapper so defaults and transform prose use the same shared escaper.
-fn inline_code(literal: &str) -> Result<String> {
-    let mut fragment = PageBuilder::<()>::new();
-    fragment.heading(Heading::code(1, literal))?;
-    let markdown = fragment.finish()?;
-    Ok(markdown
-        .strip_prefix("# ")
-        .and_then(|code| code.strip_suffix("\n\n"))
-        .context("shared code heading has no heading wrapper")?
-        .to_string())
 }
