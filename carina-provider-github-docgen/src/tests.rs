@@ -2,8 +2,8 @@ use super::*;
 use carina_plugin_sdk::core::FiniteF64;
 use carina_plugin_sdk::core::resource::{ConcreteValue, Value};
 use carina_plugin_sdk::core::schema::{
-    AttributeSchema, AttributeType, DslTransform, FieldGroup, FieldGroupKind, ResourceSchema,
-    StructField, TypeIdentity,
+    AttributeSchema, AttributeType, CompiledAttributeSchema, DslTransform, FieldGroup,
+    FieldGroupKind, ResourceSchema, StructField, TypeIdentity,
 };
 use comrak::nodes::NodeValue;
 
@@ -20,6 +20,26 @@ fn rendered_code(markdown: &str) -> Vec<String> {
         .collect()
 }
 
+fn rendered_paragraphs(markdown: &str) -> Vec<String> {
+    let arena = comrak::Arena::new();
+    let mut options = comrak::Options::default();
+    options.extension.table = true;
+    comrak::parse_document(&arena, markdown, &options)
+        .descendants()
+        .filter(|node| matches!(node.data.borrow().value, NodeValue::Paragraph))
+        .map(|paragraph| {
+            paragraph
+                .descendants()
+                .filter_map(|node| match &node.data.borrow().value {
+                    NodeValue::Text(text) => Some(text.to_string()),
+                    NodeValue::Code(code) => Some(code.literal.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn choice(name: &str, values: &[&str]) -> AttributeType {
     AttributeType::enum_(
         TypeIdentity::bare(name),
@@ -32,6 +52,29 @@ fn choice(name: &str, values: &[&str]) -> AttributeType {
 
 fn page(schema: ResourceSchema) -> String {
     render_page(&schema.validate().unwrap(), None).unwrap()
+}
+
+fn page_with_closed_enum(
+    schema: ResourceSchema,
+    literal: &str,
+    transform: &DslTransform,
+) -> String {
+    // The current protocol rejects closed-enum transforms during admission.
+    // Add this compiled fixture afterwards to exercise definition rendering.
+    let schema = schema.validate().unwrap().as_schema().clone().attribute(
+        CompiledAttributeSchema::optional(
+            "closed_transform",
+            CompiledAttributeType::enum_(
+                TypeIdentity::new(Some("github"), ["test", "Literals"], "ClosedTransformed"),
+                Some(vec![format!("value{literal}")]),
+                vec![],
+                Some(std::sync::Arc::new(|_| Ok(()))),
+                Some(transform.clone()),
+            ),
+        )
+        .build(),
+    );
+    render_schema_page(&schema, None).unwrap()
 }
 
 fn input(name: impl Into<String>, ty: AttributeType) -> AttributeSchema {
@@ -140,77 +183,104 @@ fn schema_patterns_defaults_enum_values_and_transforms_keep_their_spelling() {
                 Some(transform.clone()),
             ),
         ));
-    let page = page(schema);
+    let page = page_with_closed_enum(schema, literal, &transform);
     let code = rendered_code(&page);
     for expected in [
         literal.to_string(),
         format_value(&default),
         format!("github.test.Literals.Transformed (DSL transform: {transform:?})"),
         format!("String (pattern: ^[a-z|`]+$, DSL transform: {transform:?})"),
+        format!("{transform:?}"),
+        "github.test.Literals.ClosedTransformed.value".into(),
+        format!("value{literal}"),
     ] {
         assert!(code.contains(&expected), "missing {expected:?}: {page}");
     }
     assert!(page.contains("pattern: ^[a-z|`]+$"));
     assert!(page.contains(r"pattern: ^[a-z\|`]+$"));
     assert!(!page.contains("\\u{5b}"));
+    let paragraphs = rendered_paragraphs(&page);
+    assert!(
+        paragraphs.contains(&"Values are also checked by a custom validator.".into()),
+        "{page}"
+    );
+    assert!(
+        paragraphs.contains(&format!("DSL transform: {transform:?}.")),
+        "{page}"
+    );
 }
 
 #[test]
 fn link_shaped_literals_round_trip_as_code() {
-    let literal = "^[a](b)$";
-    let pattern = format!("String (pattern: {literal})");
-    let default = Value::Concrete(ConcreteValue::String(literal.into()));
-    let transform = DslTransform::StripSuffix(literal.into());
-    for (attribute, expected) in [
-        (
-            input(
-                "pattern",
-                AttributeType::refined_string(None, Some(literal.into()), None, None),
-            ),
-            pattern.clone(),
-        ),
-        (
-            AttributeSchema::optional("default", AttributeType::string())
-                .with_default(default.clone())
-                .build(),
-            format_value(&default),
-        ),
-        (
-            input("enum_value", choice("Choice", &[literal])),
-            literal.to_string(),
-        ),
-        (
-            input(
-                "transform",
-                AttributeType::enum_(
-                    TypeIdentity::new(Some("github"), ["test", "Literals"], "Transformed"),
-                    None,
-                    vec![],
-                    None,
-                    Some(transform.clone()),
+    for literal in ["^[a](b)$", "a|b", "`a``b`"] {
+        let pattern = format!("String (pattern: {literal})");
+        let default = Value::Concrete(ConcreteValue::String(literal.into()));
+        let transform = DslTransform::StripSuffix(literal.into());
+        for (attribute, expected) in [
+            (
+                input(
+                    "pattern",
+                    AttributeType::refined_string(None, Some(literal.into()), None, None),
                 ),
+                pattern.clone(),
             ),
-            format!("github.test.Literals.Transformed (DSL transform: {transform:?})"),
-        ),
-        (
-            input(
-                "nested",
-                AttributeType::struct_(
-                    "Settings",
-                    vec![field(
-                        "pattern",
-                        AttributeType::refined_string(None, Some(literal.into()), None, None),
-                    )],
+            (
+                AttributeSchema::optional("default", AttributeType::string())
+                    .with_default(default.clone())
+                    .build(),
+                format_value(&default),
+            ),
+            (
+                input("enum_value", choice("Choice", &[literal])),
+                literal.to_string(),
+            ),
+            (
+                input(
+                    "transform",
+                    AttributeType::enum_(
+                        TypeIdentity::new(Some("github"), ["test", "Literals"], "Transformed"),
+                        None,
+                        vec![],
+                        None,
+                        Some(transform.clone()),
+                    ),
                 ),
+                format!("github.test.Literals.Transformed (DSL transform: {transform:?})"),
             ),
-            pattern,
-        ),
-    ] {
-        let name = attribute.name().to_string();
-        let page = page(ResourceSchema::new("test.Literals").attribute(attribute));
+            (
+                input(
+                    "nested",
+                    AttributeType::struct_(
+                        "Settings",
+                        vec![field(
+                            "pattern",
+                            AttributeType::refined_string(None, Some(literal.into()), None, None),
+                        )],
+                    ),
+                ),
+                pattern,
+            ),
+        ] {
+            let name = attribute.name().to_string();
+            let page = page(ResourceSchema::new("test.Literals").attribute(attribute));
+            assert!(
+                rendered_code(&page).contains(&expected),
+                "attribute `{name}` lost literal {expected:?}: {page}"
+            );
+        }
+        let page = page_with_closed_enum(ResourceSchema::new("test.Literals"), literal, &transform);
         assert!(
-            rendered_code(&page).contains(&expected),
-            "attribute `{name}` lost literal {expected:?}: {page}"
+            rendered_code(&page).contains(&format!("{transform:?}")),
+            "{page}"
+        );
+        let paragraphs = rendered_paragraphs(&page);
+        assert!(
+            paragraphs.contains(&"Values are also checked by a custom validator.".into()),
+            "{page}"
+        );
+        assert!(
+            paragraphs.contains(&format!("DSL transform: {transform:?}.")),
+            "{page}"
         );
     }
 }

@@ -10,7 +10,8 @@ use carina_docgen::{
     TypeEdge, TypeRegistry, render_attribute_type, render_field_groups,
 };
 use carina_plugin_sdk::core::schema::{
-    Compiled, CompiledAttributeType, DslMap, IdentityMode, RawShape, TypeIdentity,
+    Compiled, CompiledAttributeType, CompiledResourceSchema, CompiledStructField, CustomValidator,
+    DslMap, DslTransform, FieldGroup, IdentityMode, RawShape, TypeIdentity,
     ValidatedResourceSchema,
 };
 use carina_plugin_sdk::core::value::format_value;
@@ -110,11 +111,18 @@ fn generate_pages(examples_dir: &Path) -> Result<BTreeMap<PathBuf, String>> {
 }
 
 fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -> Result<String> {
-    let resource = schema.as_schema();
-    let mut types = SchemaTypes::collect(schema)?;
+    render_schema_page(schema.as_schema(), example)
+}
+
+fn render_schema_page(
+    resource: &CompiledResourceSchema,
+    example: Option<&DocExample>,
+) -> Result<String> {
+    let mut types = SchemaTypes::collect(resource)?;
     let mut registry = TypeRegistry::default();
     // Discover every declaration before writing sections, preserving the existing
     // intern order even when a type is only used by a later definition.
+    // This pre-pass owns the attribute-path error context for every type render.
     for id in 0..types.types.len() {
         let ty = types.types[id];
         render_attribute_type(ty, &(), &mut types, &mut registry, None)
@@ -152,8 +160,7 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
         {
             let name = attribute.name();
             let ty =
-                render_attribute_type(attribute.attr_type(), &(), &mut types, &mut registry, None)
-                    .with_context(|| format!("cannot render type at attribute `{name}`"))?;
+                render_attribute_type(attribute.attr_type(), &(), &mut types, &mut registry, None)?;
             page.heading(Heading::code(3, name))?;
             page.push_str("- **Type:** ");
             ty.write_to(&mut page);
@@ -192,9 +199,7 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
             .map(|(name, ty)| {
                 Ok([
                     TableCell::code(name),
-                    render_attribute_type(ty, &(), &mut types, &mut registry, None)
-                        .with_context(|| format!("cannot render type at attribute `{name}`"))?
-                        .table_cell(),
+                    render_attribute_type(ty, &(), &mut types, &mut registry, None)?.table_cell(),
                 ])
             })
             .collect::<Result<Vec<_>>>()?;
@@ -207,14 +212,13 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
         ("Union Definitions", Vec::new()),
     ];
     for id in 0..types.types.len() {
-        let Some(definition) = types.definitions.remove(&id) else {
+        let Some((target, definition)) = types.definitions.remove(&id) else {
             continue;
         };
-        let (section, target) = match &definition {
-            DeclarationKind::Enum { .. } => (0, TypeTarget::Enum(id)),
-            DeclarationKind::Struct { .. } => (1, TypeTarget::Struct(id)),
-            DeclarationKind::Union { .. } => (2, TypeTarget::Union(id)),
-            DeclarationKind::Recursive => unreachable!("recursive definitions are separate"),
+        let section = match &definition {
+            Definition::Enum { .. } => 0,
+            Definition::Struct { .. } => 1,
+            Definition::Union { .. } => 2,
         };
         sections[section].1.push((id, target, definition));
     }
@@ -226,7 +230,7 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
         for (id, target, definition) in definitions {
             page.target_heading(target, Heading::code(3, &types.labels[id]))?;
             match definition {
-                DeclarationKind::Enum {
+                Definition::Enum {
                     identity,
                     base,
                     values,
@@ -235,10 +239,7 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                     to_dsl,
                 } => {
                     page.push_str("- **Base type:** ");
-                    render_attribute_type(base, &(), &mut types, &mut registry, None)
-                        .with_context(|| {
-                            format!("cannot render type at attribute `{}.base`", types.paths[id])
-                        })?
+                    render_attribute_type(base, &(), &mut types, &mut registry, None)?
                         .write_to(&mut page);
                     page.push_str("\n\n");
                     if validate.is_some() {
@@ -265,10 +266,9 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                     })?;
                     page.push_str("\n");
                 }
-                DeclarationKind::Struct {
+                Definition::Struct {
                     fields,
                     field_groups,
-                    name: _name,
                 } => {
                     let rows = fields
                         .iter()
@@ -298,14 +298,7 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                                     &mut types,
                                     &mut registry,
                                     None,
-                                )
-                                .with_context(|| {
-                                    format!(
-                                        "cannot render type at attribute `{}.{}`",
-                                        types.paths[id],
-                                        field.name()
-                                    )
-                                })?
+                                )?
                                 .table_cell(),
                                 TableCell::text(if mode.is_required() { "Yes" } else { "No" }),
                                 TableCell::text(details.join(" ")),
@@ -316,7 +309,7 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                     page.push_str("\n");
                     render_field_groups(&mut page, field_groups);
                 }
-                DeclarationKind::Union { members } => {
+                Definition::Union { members } => {
                     page.push_str("A value must match one of these member types.\n\n");
                     let rows = members
                         .iter()
@@ -324,22 +317,20 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                         .map(|(index, member)| {
                             Ok([
                                 TableCell::text((index + 1).to_string()),
-                                render_attribute_type(member, &(), &mut types, &mut registry, None)
-                                    .with_context(|| {
-                                        format!(
-                                            "cannot render type at attribute `{}.member_{}`",
-                                            types.paths[id],
-                                            index + 1
-                                        )
-                                    })?
-                                    .table_cell(),
+                                render_attribute_type(
+                                    member,
+                                    &(),
+                                    &mut types,
+                                    &mut registry,
+                                    None,
+                                )?
+                                .table_cell(),
                             ])
                         })
                         .collect::<Result<Vec<_>>>()?;
                     page.table(["Member", "Type"], rows)?;
                     page.push_str("\n");
                 }
-                DeclarationKind::Recursive => unreachable!("recursive definitions are separate"),
             }
         }
     }
@@ -351,8 +342,7 @@ fn render_page(schema: &ValidatedResourceSchema, example: Option<&DocExample>) -
                 Heading::code(3, &types.labels[id]),
             )?;
             page.push_str("- **Type:** ");
-            render_attribute_type(types.types[id], &(), &mut types, &mut registry, None)
-                .with_context(|| format!("cannot render type at attribute `{}`", types.paths[id]))?
+            render_attribute_type(types.types[id], &(), &mut types, &mut registry, None)?
                 .write_to(&mut page);
             page.push_str("\n\n");
         }
@@ -511,19 +501,37 @@ enum TypeTarget {
     Recursive(usize),
 }
 
+enum Definition<'a> {
+    Enum {
+        identity: &'a TypeIdentity,
+        base: &'a CompiledAttributeType,
+        values: &'a [String],
+        dsl_aliases: &'a [(String, String)],
+        validate: Option<&'a CustomValidator>,
+        to_dsl: Option<&'a DslTransform>,
+    },
+    Struct {
+        fields: &'a [CompiledStructField],
+        field_groups: &'a [FieldGroup],
+    },
+    Union {
+        members: &'a [CompiledAttributeType],
+    },
+}
+
 struct SchemaTypes<'a> {
-    schema: &'a ValidatedResourceSchema,
+    schema: &'a CompiledResourceSchema,
     types: Vec<&'a CompiledAttributeType>,
     labels: Vec<String>,
     paths: Vec<String>,
     ids: HashMap<*const CompiledAttributeType, usize>,
     declarations: HashMap<String, usize>,
-    definitions: BTreeMap<usize, DeclarationKind<'a, Compiled>>,
+    definitions: BTreeMap<usize, (TypeTarget, Definition<'a>)>,
     recursive: BTreeSet<usize>,
 }
 
 impl<'a> SchemaTypes<'a> {
-    fn collect(schema: &'a ValidatedResourceSchema) -> Result<Self> {
+    fn collect(schema: &'a CompiledResourceSchema) -> Result<Self> {
         let mut types = Self {
             schema,
             types: Vec::new(),
@@ -534,7 +542,7 @@ impl<'a> SchemaTypes<'a> {
             definitions: BTreeMap::new(),
             recursive: BTreeSet::new(),
         };
-        let resource = schema.as_schema();
+        let resource = schema;
         for attribute in resource.attributes().values() {
             types.intern(attribute.attr_type(), attribute.name().into())?;
         }
@@ -642,7 +650,6 @@ impl<'a> SchemaTypes<'a> {
             }
             ty = self
                 .schema
-                .as_schema()
                 .defs()
                 .get(name)
                 .with_context(|| format!("missing schema definition: {name}"))?;
@@ -705,16 +712,46 @@ impl<'a> TypeDocHooks<'a, Compiled> for SchemaTypes<'a> {
         declaration: Declaration<'a, Compiled, usize>,
     ) -> Result<DocLink<TypeTarget>> {
         let id = declaration.id;
-        let target = match &declaration.kind {
-            DeclarationKind::Enum { .. } => TypeTarget::Enum(id),
-            DeclarationKind::Struct { .. } => TypeTarget::Struct(id),
-            DeclarationKind::Union { .. } => TypeTarget::Union(id),
-            DeclarationKind::Recursive => TypeTarget::Recursive(id),
+        let (target, definition) = match declaration.kind {
+            DeclarationKind::Enum {
+                identity,
+                base,
+                values,
+                dsl_aliases,
+                validate,
+                to_dsl,
+            } => (
+                TypeTarget::Enum(id),
+                Some(Definition::Enum {
+                    identity,
+                    base,
+                    values,
+                    dsl_aliases,
+                    validate,
+                    to_dsl,
+                }),
+            ),
+            DeclarationKind::Struct {
+                name: _name,
+                fields,
+                field_groups,
+            } => (
+                TypeTarget::Struct(id),
+                Some(Definition::Struct {
+                    fields,
+                    field_groups,
+                }),
+            ),
+            DeclarationKind::Union { members } => {
+                (TypeTarget::Union(id), Some(Definition::Union { members }))
+            }
+            DeclarationKind::Recursive => {
+                self.recursive.insert(id);
+                (TypeTarget::Recursive(id), None)
+            }
         };
-        if matches!(declaration.kind, DeclarationKind::Recursive) {
-            self.recursive.insert(id);
-        } else {
-            self.definitions.insert(id, declaration.kind);
+        if let Some(definition) = definition {
+            self.definitions.insert(id, (target, definition));
         }
         Ok(DocLink {
             target,
