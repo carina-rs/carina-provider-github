@@ -3,7 +3,8 @@ use carina_plugin_sdk::core::FiniteF64;
 use carina_plugin_sdk::core::resource::{ConcreteValue, Value};
 use carina_plugin_sdk::core::schema::{
     AttributeSchema, AttributeType, CompiledAttributeSchema, DslTransform, FieldGroup,
-    FieldGroupKind, ResourceSchema, StructField, TypeIdentity,
+    FieldGroupKind, PatternMatch, PatternReason, PatternSpec, ResourceSchema, StructField,
+    TypeIdentity,
 };
 use comrak::nodes::NodeValue;
 
@@ -164,7 +165,7 @@ fn schema_patterns_defaults_enum_values_and_transforms_keep_their_spelling() {
             "Pattern",
             AttributeType::refined_string(
                 None,
-                Some("^[a-z|`]+$".into()),
+                Some(PatternSpec::new("^[a-z|`]+$", PatternMatch::Full)),
                 None,
                 Some(transform.clone()),
             ),
@@ -214,13 +215,22 @@ fn schema_patterns_defaults_enum_values_and_transforms_keep_their_spelling() {
 fn link_shaped_literals_round_trip_as_code() {
     for literal in ["^[a](b)$", "a|b", "`a``b`"] {
         let pattern = format!("String (pattern: {literal})");
+        let spec = PatternSpec::new(
+            literal,
+            PatternMatch::Substring {
+                reason: PatternReason::new(
+                    "Preserve the fixture's original regex search semantics.",
+                )
+                .unwrap(),
+            },
+        );
         let default = Value::Concrete(ConcreteValue::String(literal.into()));
         let transform = DslTransform::StripSuffix(literal.into());
         for (attribute, expected) in [
             (
                 input(
                     "pattern",
-                    AttributeType::refined_string(None, Some(literal.into()), None, None),
+                    AttributeType::refined_string(None, Some(spec.clone()), None, None),
                 ),
                 pattern.clone(),
             ),
@@ -254,7 +264,7 @@ fn link_shaped_literals_round_trip_as_code() {
                         "Settings",
                         vec![field(
                             "pattern",
-                            AttributeType::refined_string(None, Some(literal.into()), None, None),
+                            AttributeType::refined_string(None, Some(spec.clone()), None, None),
                         )],
                     ),
                 ),
@@ -303,6 +313,8 @@ fn real_oidc_subject_page_matches_the_schema_and_registry_shape() {
     else {
         panic!("repository must declare its pattern")
     };
+    assert_eq!(pattern.mode(), &PatternMatch::Full);
+    let pattern = pattern.as_str();
     assert!(page.contains(&format!("(pattern: {pattern})`")));
     assert!(rendered_code(page).contains(&format!(
         "github.actions.OidcSubject.Repository (pattern: {pattern})"
@@ -639,7 +651,7 @@ fn aliases_reject_cycles_and_preserve_recursive_definitions() {
                         AttributeType::map_with_key(
                             AttributeType::reference(
                                 TypeIdentity::bare("Key"),
-                                Some("^key$".into()),
+                                Some(PatternSpec::new("^key$", PatternMatch::Full)),
                                 Some((None, Some(8))),
                             ),
                             AttributeType::refined_float(

@@ -356,21 +356,30 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
         ValidatedConfigSchema::default()
     }
 
-    fn validate_config(&self, _attrs: &BTreeMap<String, Value>) -> Result<(), String> {
+    fn validate_config(&self, _attrs: &BTreeMap<String, Value>) -> Result<(), ProviderError> {
         Ok(())
     }
 
-    fn initialize(&mut self, _attrs: &BTreeMap<String, Value>) -> Result<ReferenceScope, String> {
+    fn initialize(
+        &mut self,
+        _attrs: &BTreeMap<String, Value>,
+    ) -> Result<ReferenceScope, ProviderError> {
         self.token = None;
-        let token = std::env::var("GITHUB_TOKEN").map_err(|error| match error {
-            std::env::VarError::NotPresent => {
-                "GitHub provider configuration: GITHUB_TOKEN must be set and non-empty".to_string()
-            }
-            std::env::VarError::NotUnicode(_) => {
-                "GitHub provider configuration: GITHUB_TOKEN is not valid Unicode".to_string()
-            }
+        let token = std::env::var("GITHUB_TOKEN").map_err(|failure| {
+            error(
+                ProviderErrorKind::InvalidInput,
+                match failure {
+                    std::env::VarError::NotPresent => {
+                        "GitHub provider configuration: GITHUB_TOKEN must be set and non-empty"
+                    }
+                    std::env::VarError::NotUnicode(_) => {
+                        "GitHub provider configuration: GITHUB_TOKEN is not valid Unicode"
+                    }
+                },
+            )
         })?;
-        let token = GithubToken::new(token)?;
+        let token = GithubToken::new(token)
+            .map_err(|message| error(ProviderErrorKind::InvalidInput, message))?;
         self.token = Some(token);
         Ok(ReferenceScope::Unavailable)
     }
