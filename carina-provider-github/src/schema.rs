@@ -1,6 +1,6 @@
 use carina_plugin_sdk::core::schema::{
-    AttributeSchema, AttributeType, ListElements, ResourceSchema, TypeIdentity,
-    ValidatedResourceSchema,
+    AttributeSchema, AttributeType, ListElements, PatternMatch, PatternSpec, ResourceSchema,
+    TypeIdentity, ValidatedResourceSchema,
 };
 
 pub(crate) const CLAIM_KEYS: &[&str] = &[
@@ -49,10 +49,10 @@ pub(crate) fn oidc_subject() -> ValidatedResourceSchema {
                         ["actions", "OidcSubject"],
                         "Repository",
                     )),
-                    Some(
-                        r"^[A-Za-z0-9-]+/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*|\.[A-Za-z0-9_-][A-Za-z0-9._-]*|\.\.[A-Za-z0-9._-]+)$"
-                            .into(),
-                    ),
+                    Some(PatternSpec::new(
+                        r"^[A-Za-z0-9-]+/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*|\.[A-Za-z0-9_-][A-Za-z0-9._-]*|\.\.[A-Za-z0-9._-]+)$",
+                        PatternMatch::Full,
+                    )),
                     None,
                     None,
                 ),

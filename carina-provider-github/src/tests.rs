@@ -1037,7 +1037,7 @@ fn empty_github_token_fails_before_any_request() {
 
 fn assert_initialization_failure() {
     let mut provider = GithubProvider::<FakeApi>::default();
-    let message = provider.initialize(&BTreeMap::new()).unwrap_err();
+    let message = provider.initialize(&BTreeMap::new()).unwrap_err().message;
     assert!(message.contains("GITHUB_TOKEN"));
     assert!(message.contains("configuration"));
     assert!(message.contains("must be set and non-empty"));
@@ -1058,7 +1058,7 @@ fn non_unicode_github_token_is_a_redacted_configuration_error() {
         return;
     }
     let mut provider = provider([]);
-    let message = provider.initialize(&BTreeMap::new()).unwrap_err();
+    let message = provider.initialize(&BTreeMap::new()).unwrap_err().message;
     assert_eq!(
         message,
         "GitHub provider configuration: GITHUB_TOKEN is not valid Unicode"
@@ -1191,6 +1191,53 @@ fn schema_use_default_is_provider_populated_bool() {
 
 #[test]
 fn schema_rejects_authored_use_default() {
+    use carina_plugin_sdk::core::provider::{
+        BoxFuture, CanonicalProviderConfigAttributes, InitializeOutcomeMint, ProviderFactory,
+        ProviderInitialization, ProviderResult, ProviderSession, ProviderValidationInputs,
+        provider_custom_types_from_factories,
+    };
+    use carina_plugin_sdk::core::schema::ValidatedProviderSchemaWitness;
+
+    struct SchemaFactory(ProviderSchemaCache);
+
+    impl ProviderFactory for SchemaFactory {
+        fn name(&self) -> &str {
+            "github"
+        }
+
+        fn display_name(&self) -> &str {
+            "GitHub"
+        }
+
+        fn provider_config_attribute_types(&self) -> ValidatedConfigSchema {
+            self.0.config().clone()
+        }
+
+        fn validate_config(
+            &self,
+            _attributes: &CanonicalProviderConfigAttributes,
+            _inputs: &ProviderValidationInputs,
+        ) -> ProviderResult<()> {
+            Ok(())
+        }
+
+        fn create_provider(
+            &self,
+            _session: &ProviderSession,
+            _mint: InitializeOutcomeMint,
+        ) -> BoxFuture<'_, ProviderResult<ProviderInitialization>> {
+            unreachable!("schema validation does not initialize a provider")
+        }
+
+        fn schemas(&self) -> Vec<ValidatedResourceSchema> {
+            self.0.schemas().to_vec()
+        }
+
+        fn schema_witness(&self) -> ValidatedProviderSchemaWitness {
+            self.0.witness().clone()
+        }
+    }
+
     let provider = GithubProvider::<FakeApi>::default();
     let cache = ProviderSchemaCache::from_provider(&provider).unwrap();
     let mut registry = SchemaRegistry::new();
@@ -1200,8 +1247,9 @@ fn schema_rejects_authored_use_default() {
     let schema = registry
         .get("github", "actions.OidcSubject", SchemaKind::Resource)
         .unwrap();
-    let resolver =
-        |_: carina_plugin_sdk::core::parser::CustomTypeValidationTarget<'_>, _: &CoreValue| Ok(());
+    let resolver = provider_custom_types_from_factories(std::sync::Arc::new(vec![Box::new(
+        SchemaFactory(cache),
+    )]));
     let mut attrs: std::collections::HashMap<String, CoreValue> =
         std::collections::HashMap::from([(
             "repository".into(),

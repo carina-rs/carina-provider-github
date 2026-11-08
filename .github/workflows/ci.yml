@@ -120,9 +120,19 @@ jobs:
       - run: bash scripts/check-provider-sdk-bindings.sh
       - run: bash scripts/test-check-provider-sdk-bindings.sh
 
+  test-utils-dev-only:
+    name: Check test-utils dev-only features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/check-test-utils-dev-only.sh
+      - run: bash scripts/test-check-test-utils-dev-only.sh
+
   publish-dev:
     name: Publish to Carina Registry (dev)
-    needs: [check, test, clippy, fmt, docs-drift, docs-bundle, wasm-build, carina-pin, sdk-bindings]
+    needs: [check, test, clippy, fmt, docs-drift, docs-bundle, wasm-build, carina-pin, sdk-bindings, test-utils-dev-only]
     if: github.repository == 'carina-rs/carina-provider-github' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
