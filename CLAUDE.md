@@ -38,11 +38,18 @@ cargo fmt --check
 
 ## Dependencies on carina (main repo)
 
-This repository depends only on `carina-plugin-sdk` from
+The provider depends on `carina-plugin-sdk` from
 `github.com/carina-rs/carina`, pinned by exact `rev` in `Cargo.toml` and
 checked by `scripts/check-carina-pin.sh`. The SDK re-exports
 `carina-core` (`carina_plugin_sdk::core`) and `carina-provider-protocol`
-(`carina_plugin_sdk::protocol`).
+(`carina_plugin_sdk::protocol`). Native tests also use `carina-core` with
+`test-utils` and `provider-host` as a target-specific dev dependency.
+Those features must never enter the component's normal dependency graph.
+
+The native doc generator uses `carina-docgen` from
+`github.com/carina-rs/carina-provider-aws`, pinned by exact `rev` in
+`Cargo.toml`. Its carina pin must match the SDK's, so the workspace resolves
+one `carina-core` revision.
 
 The SDK owns the WIT and the generated bindings (carina-rs/carina#4191).
 Do not add `wit-bindgen`, a `carina-plugin-bindings-*` crate, or a
@@ -54,7 +61,30 @@ dependency in `.cargo/config.toml`:
 ```toml
 [patch."https://github.com/carina-rs/carina"]
 carina-plugin-sdk = { path = "../carina/carina-plugin-sdk" }
+carina-core = { path = "../carina/carina-core" }
 ```
+
+## Provider diagnostics
+
+Protocol 25 requires a host supporting `carina:provider@0.2.0`. Guest stdout
+and stderr are discarded throughout the component lifetime. Emit additional
+diagnostics through `ProviderDiagnostics::emit` with a typed `ProviderEvent`;
+use `expect_diagnostic` / `panic_diagnostic` for typed panic payloads. The
+native docgen CLI can still print its usage.
+
+Initialization validates `GITHUB_TOKEN`, registers `GithubTokenMaterial`
+with the runtime's `ProviderDiagnostics`, and retains only
+`RegisteredGithubToken`. A registration failure returns a typed provider
+error with its cause and leaves no usable token. Requests acquire their
+authorization only through `RegisteredGithubToken::authorize`, and
+`GithubApi::send` accepts only `RegisteredRequest`, including native fakes.
+
+Returned provider errors remain opaque until the host binds them with the
+same session inventory as typed events. This masks token echoes in messages,
+causes and request IDs, including older token generations. Do not restore a
+local plaintext token wrapper or token-specific string replacement. Native
+tests inspect unsigned requests before authorization and bind errors through
+the real core boundary using the registration session.
 
 ## Git Workflow
 

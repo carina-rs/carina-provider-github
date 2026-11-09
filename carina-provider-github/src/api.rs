@@ -1,7 +1,7 @@
 //! The HTTP seam: native tests supply a fake and WASM uses the SDK transport.
 
-use http::{HeaderValue, Request, Response};
-use std::fmt;
+use carina_plugin_sdk::protected_material::RegisteredRequest;
+use http::Response;
 
 /// Whether a transport failure could have transmitted the request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11,14 +11,14 @@ pub enum TransportError {
 }
 
 pub trait GithubApi {
-    fn send(&self, request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, TransportError>;
+    fn send(&self, request: RegisteredRequest) -> Result<Response<Vec<u8>>, TransportError>;
 }
 
 #[derive(Default)]
 pub struct HttpGithubApi;
 
 impl GithubApi for HttpGithubApi {
-    fn send(&self, request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, TransportError> {
+    fn send(&self, request: RegisteredRequest) -> Result<Response<Vec<u8>>, TransportError> {
         #[cfg(target_arch = "wasm32")]
         {
             use carina_plugin_sdk::wasi_http::{SendPhase, send_request};
@@ -33,40 +33,5 @@ impl GithubApi for HttpGithubApi {
             let _ = request;
             Err(TransportError::NotSent)
         }
-    }
-}
-
-/// Credentials have no ordinary diagnostic or serialization representation.
-pub(crate) struct GithubToken(String);
-
-impl GithubToken {
-    pub(crate) fn new(value: String) -> Result<Self, String> {
-        if value.is_empty() {
-            return Err(
-                "GitHub provider configuration: GITHUB_TOKEN must be set and non-empty".into(),
-            );
-        }
-        HeaderValue::from_str(&format!("Bearer {value}")).map_err(|_| {
-            "GitHub provider configuration: GITHUB_TOKEN is not a valid authorization header"
-                .to_string()
-        })?;
-        Ok(Self(value))
-    }
-
-    pub(crate) fn authorization(&self) -> HeaderValue {
-        let mut header = HeaderValue::from_str(&format!("Bearer {}", self.0))
-            .expect("validated GitHub token is a header value");
-        header.set_sensitive(true);
-        header
-    }
-
-    pub(crate) fn redact(&self, value: &str) -> String {
-        value.replace(&self.0, "[REDACTED]")
-    }
-}
-
-impl fmt::Debug for GithubToken {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("GithubToken([REDACTED])")
     }
 }

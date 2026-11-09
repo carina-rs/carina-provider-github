@@ -27,7 +27,7 @@ Ordered subject claims; omit to use GitHub's default subject
 
 ### `repository`
 
-- **Type:** `github.actions.OidcSubject.Repository (pattern: ^[A-Za-z0-9-]+/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*|\.[A-Za-z0-9_-][A-Za-z0-9._-]*|\.\.[A-Za-z0-9._-]+)$)`
+- **Type:** `github.actions.OidcSubject.Repository (pattern: /^[A-Za-z0-9-]+/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*|\.[A-Za-z0-9_-][A-Za-z0-9._-]*|\.\.[A-Za-z0-9._-]+)$/ (Full))`
 - **Required:** Yes
 - **Create-only:** Yes
 - **Identity:** Required (omitting this value leaves identity incomplete)
