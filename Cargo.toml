@@ -10,6 +10,6 @@ resolver = "3"
 version = "0.2.0"
 
 [workspace.dependencies]
-carina-plugin-sdk = { git = "https://github.com/carina-rs/carina", rev = "f88e9d59b4139d6bed34f907d47f0c74a7551032" }
-carina-core = { git = "https://github.com/carina-rs/carina", rev = "f88e9d59b4139d6bed34f907d47f0c74a7551032" }
-carina-docgen = { git = "https://github.com/carina-rs/carina-provider-aws", rev = "a95ba579596522369290cf36fe09092f11bb0395" }
+carina-plugin-sdk = { git = "https://github.com/carina-rs/carina", rev = "93110feca9f244f0ce88ebf02038fe7e8616765b" }
+carina-core = { git = "https://github.com/carina-rs/carina", rev = "93110feca9f244f0ce88ebf02038fe7e8616765b" }
+carina-docgen = { git = "https://github.com/carina-rs/carina-provider-aws", rev = "64e2c09743350734b56c9ff1ea9a7e73f8806bf6" }
