@@ -162,6 +162,18 @@ must not import the AWS credentials interface. There is no `auth` block
 and no in-provider token minting. A missing token is a configuration
 error at initialization, before any request.
 
+After validation, initialization registers `GithubTokenMaterial` through
+`ProviderDiagnostics` and stores the acknowledged `RegisteredGithubToken`.
+Only its `authorize` method can attach the token to a request. Both the WASM
+transport and native fake API accept `RegisteredRequest`. Registration failure
+returns a typed provider error with its cause and clears the previous token.
+
+Protocol 25 discards guest stdout and stderr. Typed diagnostics use
+`ProviderDiagnostics::emit`; returned errors and these events share the host
+redaction inventory, including earlier token generations. API error messages
+remain opaque until host binding, so the provider keeps no local token copy
+for string replacement. The native documentation CLI retains normal output.
+
 Required permission: Actions write on the repository (fine-grained PAT),
 or the `repo` scope (classic PAT). Whether an Actions workflow
 `GITHUB_TOKEN` with `permissions: actions: write` is enough is verified by
@@ -193,7 +205,8 @@ with `--trust-local-provider <path>=github`.
 - A second crate, `carina-provider-github-docgen`, is a native tool that
   writes the registry documentation pages from the provider's exported
   schemas (`resource_schemas()`) with `carina-docgen` from
-  carina-rs/carina-provider-aws. The provider does not depend on it.
+  carina-rs/carina-provider-aws. Its pinned revision uses the same carina
+  revision as the SDK. The provider does not depend on it.
 - Dependencies: `carina-plugin-sdk` pinned by exact `rev` (the SDK
   re-exports `carina-core` and `carina-provider-protocol`), `http`,
   `serde`, `serde_json`. No `wit-bindgen` and no `carina-plugin-wit`

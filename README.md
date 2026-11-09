@@ -36,6 +36,12 @@ Authentication uses `GITHUB_TOKEN`, with Actions write permission on the
 repository for a fine-grained PAT, or the `repo` scope for a classic PAT.
 The provider block has no configuration attributes.
 
+Initialization registers the token with Carina's diagnostics session before
+authorizing any HTTP request. Registration failures stop initialization;
+the host masks registered tokens in returned errors and typed diagnostics.
+Guest stdout and stderr are discarded. This component requires Carina
+protocol 25 (`carina:provider@0.2.0`).
+
 ## Local development
 
 Use a Carina CLI compatible with the SDK revision pinned in `Cargo.toml`.

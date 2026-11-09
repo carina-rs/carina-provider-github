@@ -1,5 +1,6 @@
 use super::*;
-use crate::api::{GithubApi, GithubToken, TransportError};
+use crate::api::{GithubApi, TransportError};
+use carina_core::test_utils::provider_text::{self, BindProviderText, Context};
 use carina_plugin_sdk::core::parser::ProviderCustomTypes;
 use carina_plugin_sdk::core::resource::{
     ConcreteValue, DeferredValue, Resource as CoreResource, Value as CoreValue,
@@ -7,6 +8,7 @@ use carina_plugin_sdk::core::resource::{
 use carina_plugin_sdk::core::schema::{
     CompiledAttributeType, IdentityMode, SchemaKind, SchemaRegistry, TypeError, TypeInSchema,
 };
+use carina_plugin_sdk::protected_material::{RegisteredRequest, RegistrationError};
 use carina_plugin_sdk::protocol::types::{
     CreateStep as WireCreateStep, CreateVerdict as WireCreateVerdict,
 };
@@ -15,29 +17,45 @@ use http::{Request, Response};
 use serde_json::json;
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 const TEST_TOKEN: &str = "github_test_secret_never_print";
 const REPOSITORY: &str = "carina-test/oidc-subject";
 
-#[derive(Default)]
 struct FakeApi {
-    requests: RefCell<Vec<Request<Vec<u8>>>>,
+    requests: Rc<RefCell<Vec<Request<Vec<u8>>>>>,
+    registered_requests: RefCell<Vec<RegisteredRequest>>,
     responses: RefCell<VecDeque<Result<Response<Vec<u8>>, TransportError>>>,
+    context: Context,
+}
+
+impl Default for FakeApi {
+    fn default() -> Self {
+        Self {
+            requests: Default::default(),
+            registered_requests: Default::default(),
+            responses: Default::default(),
+            context: provider_text::context(&[]),
+        }
+    }
 }
 
 impl GithubApi for FakeApi {
-    fn send(&self, request: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, TransportError> {
+    fn send(&self, registered: RegisteredRequest) -> Result<Response<Vec<u8>>, TransportError> {
+        assert!(!format!("{registered:?}").contains(TEST_TOKEN));
+        self.registered_requests.borrow_mut().push(registered);
+        // Inspect the request observed before SDK authorization, never unwrap the
+        // registered capability or create a second raw-token authorization path.
+        let requests = self.requests.borrow();
+        assert_eq!(requests.len(), self.registered_requests.borrow().len());
+        let request = requests.last().unwrap();
         assert_eq!(request.uri().scheme_str(), Some("https"));
         assert_eq!(request.uri().host(), Some("api.github.com"));
         assert_eq!(
             request.uri().path(),
             format!("/repos/{REPOSITORY}/actions/oidc/customization/sub")
         );
-        assert_eq!(
-            request.headers()["authorization"],
-            format!("Bearer {TEST_TOKEN}")
-        );
-        assert!(request.headers()["authorization"].is_sensitive());
+        assert!(!request.headers().contains_key("authorization"));
         assert_eq!(request.headers()["accept"], "application/vnd.github+json");
         assert_eq!(request.headers()["x-github-api-version"], "2022-11-28");
         assert!(!request.headers()["user-agent"].is_empty());
@@ -48,7 +66,6 @@ impl GithubApi for FakeApi {
             assert!(body.get("sub_claim_prefix").is_none());
             assert_eq!(request.headers()["content-type"], "application/json");
         }
-        self.requests.borrow_mut().push(request);
         self.responses
             .borrow_mut()
             .pop_front()
@@ -66,12 +83,31 @@ fn response(status: u16, body: serde_json::Value) -> Result<Response<Vec<u8>>, T
 fn provider(
     responses: impl IntoIterator<Item = Result<Response<Vec<u8>>, TransportError>>,
 ) -> GithubProvider<FakeApi> {
+    let mut provider = uninitialized_provider(responses);
+    provider.token = Some(
+        provider
+            .diagnostics
+            .as_ref()
+            .unwrap()
+            .register_github_token(GithubTokenMaterial::new(TEST_TOKEN.into()))
+            .unwrap(),
+    );
+    provider
+}
+
+fn uninitialized_provider(
+    responses: impl IntoIterator<Item = Result<Response<Vec<u8>>, TransportError>>,
+) -> GithubProvider<FakeApi> {
+    let api = FakeApi {
+        responses: RefCell::new(responses.into_iter().collect()),
+        ..Default::default()
+    };
+    let diagnostics = ProviderDiagnostics::from_session(api.context.session());
     GithubProvider {
-        api: FakeApi {
-            responses: RefCell::new(responses.into_iter().collect()),
-            ..Default::default()
-        },
-        token: Some(GithubToken::new(TEST_TOKEN.into()).unwrap()),
+        unsigned_requests: api.requests.clone(),
+        api,
+        token: None,
+        diagnostics: Some(diagnostics),
     }
 }
 
@@ -282,7 +318,8 @@ fn create_rejects_empty_claim_keys_before_any_request() {
         let WireCreateVerdict::NotCreated(error) = *verdict else {
             panic!("expected NotCreated");
         };
-        assert_eq!(error.kind, ProviderErrorKind::InvalidInput);
+        let error = error.with_secrets_for_test(&provider.api.context);
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidInput);
         assert!(provider.api.requests.borrow().is_empty());
     }
 }
@@ -399,11 +436,15 @@ fn read_404_is_an_error() {
         let provider = provider([response(404, body)]);
         let error = provider
             .read(&id(), &identifier(), ReadRequest)
-            .unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::ApiError);
-        assert_eq!(error.status, Some(404));
-        assert_eq!(error.operation.as_deref(), Some("actions.OidcSubject.GET"));
-        assert_eq!(error.message, expected_message);
+            .unwrap_err()
+            .with_secrets_for_test(&provider.api.context);
+        assert_eq!(error.kind(), ProviderErrorKind::ApiError);
+        assert_eq!(error.detail().status, Some(404));
+        assert_eq!(
+            error.to_wire().operation.as_deref(),
+            Some("actions.OidcSubject.GET")
+        );
+        assert_eq!(error.to_wire().message, expected_message);
     }
 }
 
@@ -448,8 +489,7 @@ fn update_custom_to_custom_uses_patch() {
             }]),
         )
         .unwrap();
-    let UpdateOutcome::Done(carina_plugin_sdk::protocol::UpdateOutcome::Success { state }) =
-        outcome
+    let UpdateOutcome::Done(carina_plugin_sdk::types::UpdateOutcome::Success { state }) = outcome
     else {
         panic!("expected successful update");
     };
@@ -472,8 +512,7 @@ fn update_removing_claim_keys_without_use_default_resets_to_default() {
     }]);
     request.from.attributes.remove("use_default");
     let outcome = provider.update(&id(), &identifier(), request).unwrap();
-    let UpdateOutcome::Done(carina_plugin_sdk::protocol::UpdateOutcome::Success { state }) =
-        outcome
+    let UpdateOutcome::Done(carina_plugin_sdk::types::UpdateOutcome::Success { state }) = outcome
     else {
         panic!("expected successful update");
     };
@@ -498,7 +537,7 @@ fn update_custom_to_default_accepts_use_default_patch_in_either_order() {
         let outcome = provider
             .update(&id(), &identifier(), update_request(ops))
             .unwrap();
-        let UpdateOutcome::Done(carina_plugin_sdk::protocol::UpdateOutcome::Success { state }) =
+        let UpdateOutcome::Done(carina_plugin_sdk::types::UpdateOutcome::Success { state }) =
             outcome
         else {
             panic!("expected successful update");
@@ -538,11 +577,11 @@ fn update_use_default_only_uses_patched_state() {
                 .collect();
             let outcome = provider.update(&id(), &identifier(), request);
             if claim_keys.is_some_and(|keys| keys.is_empty()) {
-                assert_eq!(outcome.unwrap_err().kind, ProviderErrorKind::InvalidInput);
+                assert_eq!(outcome.unwrap_err().kind(), ProviderErrorKind::InvalidInput);
                 assert!(provider.api.requests.borrow().is_empty());
                 continue;
             }
-            let UpdateOutcome::Done(carina_plugin_sdk::protocol::UpdateOutcome::Success { state }) =
+            let UpdateOutcome::Done(carina_plugin_sdk::types::UpdateOutcome::Success { state }) =
                 outcome.unwrap()
             else {
                 panic!("expected successful update");
@@ -574,8 +613,7 @@ fn update_use_default_only_repairs_default_subject_drift() {
         .attributes
         .insert("claim_keys".into(), keys(&["repo"]).into());
     let outcome = provider.update(&id(), &identifier(), request).unwrap();
-    let UpdateOutcome::Done(carina_plugin_sdk::protocol::UpdateOutcome::Success { state }) =
-        outcome
+    let UpdateOutcome::Done(carina_plugin_sdk::types::UpdateOutcome::Success { state }) = outcome
     else {
         panic!("expected successful update");
     };
@@ -599,9 +637,12 @@ fn update_use_default_false_without_claim_keys_errors_before_sending() {
         }]),
     ] {
         let provider = provider([response(204, json!(null))]);
-        let error = provider.update(&id(), &identifier(), request).unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::InvalidInput);
-        assert!(error.message.contains("claim_keys"));
+        let error = provider
+            .update(&id(), &identifier(), request)
+            .unwrap_err()
+            .with_secrets_for_test(&provider.api.context);
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidInput);
+        assert!(error.to_wire().message.contains("claim_keys"));
         assert!(provider.api.requests.borrow().is_empty());
     }
 }
@@ -677,12 +718,13 @@ fn update_failures_return_error_without_retry_or_read_back() {
                     value: keys(&["repo"]),
                 }]),
             )
-            .unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::ApiError);
-        assert_eq!(error.status, expected_status);
+            .unwrap_err()
+            .with_secrets_for_test(&provider.api.context);
+        assert_eq!(error.kind(), ProviderErrorKind::ApiError);
+        assert_eq!(error.detail().status, expected_status);
         if expected_status == Some(404) {
             assert_eq!(
-                error.message,
+                error.to_wire().message,
                 "GitHub API returned HTTP 404 Not Found: Not Found. \
                  The repository was not found, or the token cannot access it. \
                  If the repository really was deleted, remove this resource from state with a \
@@ -729,11 +771,15 @@ fn delete_404_is_an_error() {
         let provider = provider([response(404, body)]);
         let error = provider
             .delete(&id(), &identifier(), DeleteRequest::default())
-            .unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::ApiError);
-        assert_eq!(error.status, Some(404));
-        assert_eq!(error.operation.as_deref(), Some("actions.OidcSubject.PUT"));
-        assert_eq!(error.message, expected_message);
+            .unwrap_err()
+            .with_secrets_for_test(&provider.api.context);
+        assert_eq!(error.kind(), ProviderErrorKind::ApiError);
+        assert_eq!(error.detail().status, Some(404));
+        assert_eq!(
+            error.to_wire().operation.as_deref(),
+            Some("actions.OidcSubject.PUT")
+        );
+        assert_eq!(error.to_wire().message, expected_message);
         assert_body(&provider, 0, json!({"use_default": true}));
     }
 }
@@ -748,8 +794,9 @@ fn delete_failures_return_error() {
         let provider = provider([failure]);
         let error = provider
             .delete(&id(), &identifier(), DeleteRequest::default())
-            .unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::ApiError);
+            .unwrap_err()
+            .with_secrets_for_test(&provider.api.context);
+        assert_eq!(error.kind(), ProviderErrorKind::ApiError);
         assert_eq!(provider.api.requests.borrow().len(), 1);
         assert_body(&provider, 0, json!({"use_default": true}));
     }
@@ -766,10 +813,16 @@ fn definite_4xx_create_failures_are_not_created_with_github_message() {
         let WireCreateVerdict::NotCreated(error) = *verdict else {
             panic!("expected NotCreated");
         };
-        assert_eq!(error.status, Some(status));
-        assert!(error.message.contains("GitHub rejected this request"));
+        let error = error.with_secrets_for_test(&provider.api.context);
+        assert_eq!(error.detail().status, Some(status));
+        assert!(
+            error
+                .to_wire()
+                .message
+                .contains("GitHub rejected this request")
+        );
         assert_eq!(
-            error.kind,
+            error.kind(),
             if status == 400 || status == 422 {
                 ProviderErrorKind::InvalidInput
             } else {
@@ -799,10 +852,14 @@ fn not_created_create_404_message_is_exact() {
         let WireCreateVerdict::NotCreated(error) = *verdict else {
             panic!("expected NotCreated");
         };
-        assert_eq!(error.kind, ProviderErrorKind::ApiError);
-        assert_eq!(error.status, Some(404));
-        assert_eq!(error.operation.as_deref(), Some("actions.OidcSubject.PUT"));
-        assert_eq!(error.message, expected_message);
+        let error = error.with_secrets_for_test(&provider.api.context);
+        assert_eq!(error.kind(), ProviderErrorKind::ApiError);
+        assert_eq!(error.detail().status, Some(404));
+        assert_eq!(
+            error.to_wire().operation.as_deref(),
+            Some("actions.OidcSubject.PUT")
+        );
+        assert_eq!(error.to_wire().message, expected_message);
         assert_eq!(provider.api.requests.borrow().len(), 1);
     }
 }
@@ -864,11 +921,12 @@ fn uncertain_create_keeps_identifier_when_read_back_fails() {
         let Observation::ReadFailed(error) = failure.observation else {
             panic!("expected read-back failure");
         };
-        assert_eq!(error.status, expected_status);
+        let error = error.with_secrets_for_test(&provider.api.context);
+        assert_eq!(error.detail().status, expected_status);
         if expected_status == Some(404) {
-            assert_eq!(error.kind, ProviderErrorKind::ApiError);
+            assert_eq!(error.kind(), ProviderErrorKind::ApiError);
             assert_eq!(
-                error.message,
+                error.to_wire().message,
                 "GitHub API returned HTTP 404 Not Found: Not Found. \
                  The repository was not found, or the token cannot access it. \
                  If the repository really was deleted, remove this resource from state with a \
@@ -901,24 +959,24 @@ fn invalid_create_is_not_created_before_any_request() {
 
 #[test]
 fn token_is_redacted_in_debug_and_errors() {
-    let token = GithubToken::new(TEST_TOKEN.into()).unwrap();
+    let token = provider([]).token.unwrap();
     assert!(!format!("{token:?}").contains(TEST_TOKEN));
     let request_id = "ABCD:0123:4567:89AB:CDEF";
     for (status, expected_message) in [
         (
             401,
-            "GitHub API returned HTTP 401 Unauthorized: rejected Bearer [REDACTED]",
+            "GitHub API returned HTTP 401 Unauthorized: rejected Bearer (secret)",
         ),
         (
             404,
-            "GitHub API returned HTTP 404 Not Found: rejected Bearer [REDACTED]. \
+            "GitHub API returned HTTP 404 Not Found: rejected Bearer (secret). \
              The repository was not found, or the token cannot access it. \
              If the repository really was deleted, remove this resource from state with a \
              `removed { from = ... }` block.",
         ),
         (
             500,
-            "GitHub API returned HTTP 500 Internal Server Error: rejected Bearer [REDACTED]",
+            "GitHub API returned HTTP 500 Internal Server Error: rejected Bearer (secret)",
         ),
     ] {
         let echoed = format!("rejected Bearer {TEST_TOKEN}");
@@ -932,24 +990,38 @@ fn token_is_redacted_in_debug_and_errors() {
         let error = provider
             .read(&id(), &identifier(), ReadRequest)
             .unwrap_err();
-        assert_eq!(error.kind, ProviderErrorKind::ApiError);
-        assert_eq!(error.status, Some(status));
-        assert_eq!(error.operation.as_deref(), Some("actions.OidcSubject.GET"));
         assert!(!format!("{error:?}").contains(TEST_TOKEN));
-        assert!(!serde_json::to_string(&error).unwrap().contains(TEST_TOKEN));
-        assert_eq!(error.message, expected_message);
-        assert_eq!(error.request_id.as_deref(), Some(request_id));
+        let error = error.with_secrets_for_test(&provider.api.context);
+        assert_eq!(error.kind(), ProviderErrorKind::ApiError);
+        assert_eq!(error.detail().status, Some(status));
+        assert_eq!(
+            error.to_wire().operation.as_deref(),
+            Some("actions.OidcSubject.GET")
+        );
+        assert!(!format!("{error:?}").contains(TEST_TOKEN));
+        assert!(
+            !serde_json::to_string(&error.to_wire())
+                .unwrap()
+                .contains(TEST_TOKEN)
+        );
+        assert_eq!(error.to_wire().message, expected_message);
+        assert_eq!(error.to_wire().request_id.as_deref(), Some(request_id));
     }
     let body = format!("upstream error {TEST_TOKEN}").into_bytes();
     let body_len = body.len();
     let provider = provider([Ok(Response::builder().status(502).body(body).unwrap())]);
     let error = provider
         .read(&id(), &identifier(), ReadRequest)
-        .unwrap_err();
+        .unwrap_err()
+        .with_secrets_for_test(&provider.api.context);
     assert!(!format!("{error:?}").contains(TEST_TOKEN));
-    assert!(!serde_json::to_string(&error).unwrap().contains(TEST_TOKEN));
+    assert!(
+        !serde_json::to_string(&error.to_wire())
+            .unwrap()
+            .contains(TEST_TOKEN)
+    );
     assert_eq!(
-        error.message,
+        error.to_wire().message,
         format!(
             "GitHub API returned HTTP 502 Bad Gateway with no error message in the body ({body_len} bytes)"
         )
@@ -967,9 +1039,10 @@ fn large_html_error_body_is_not_included_in_message() {
     let provider = provider([Ok(Response::builder().status(502).body(body).unwrap())]);
     let error = provider
         .read(&id(), &identifier(), ReadRequest)
-        .unwrap_err();
+        .unwrap_err()
+        .with_secrets_for_test(&provider.api.context);
     assert_eq!(
-        error.message,
+        error.to_wire().message,
         format!(
             "GitHub API returned HTTP 502 Bad Gateway with no error message in the body ({body_len} bytes)"
         )
@@ -983,9 +1056,10 @@ fn json_error_bodies_without_a_string_message_are_summarized() {
         let provider = provider([response(502, body)]);
         let error = provider
             .read(&id(), &identifier(), ReadRequest)
-            .unwrap_err();
+            .unwrap_err()
+            .with_secrets_for_test(&provider.api.context);
         assert_eq!(
-            error.message,
+            error.to_wire().message,
             format!(
                 "GitHub API returned HTTP 502 Bad Gateway with no error message in the body ({body_len} bytes)"
             )
@@ -1036,11 +1110,20 @@ fn empty_github_token_fails_before_any_request() {
 }
 
 fn assert_initialization_failure() {
-    let mut provider = GithubProvider::<FakeApi>::default();
-    let message = provider.initialize(&BTreeMap::new()).unwrap_err().message;
+    let mut provider = provider([]);
+    let message = provider
+        .initialize(&BTreeMap::new())
+        .unwrap_err()
+        .with_secrets_for_test(&provider.api.context)
+        .to_wire()
+        .message;
     assert!(message.contains("GITHUB_TOKEN"));
     assert!(message.contains("configuration"));
-    assert!(message.contains("must be set and non-empty"));
+    assert_eq!(
+        message,
+        "GitHub provider configuration: GITHUB_TOKEN must be set and non-empty"
+    );
+    assert!(provider.token.is_none());
     assert!(dispatch_create(&provider, &id(), create_request(None)).is_err());
     assert!(provider.api.requests.borrow().is_empty());
 }
@@ -1058,7 +1141,12 @@ fn non_unicode_github_token_is_a_redacted_configuration_error() {
         return;
     }
     let mut provider = provider([]);
-    let message = provider.initialize(&BTreeMap::new()).unwrap_err().message;
+    let message = provider
+        .initialize(&BTreeMap::new())
+        .unwrap_err()
+        .with_secrets_for_test(&provider.api.context)
+        .to_wire()
+        .message;
     assert_eq!(
         message,
         "GitHub provider configuration: GITHUB_TOKEN is not valid Unicode"
@@ -1077,22 +1165,175 @@ fn initialize_reads_token_from_environment() {
     ) {
         return;
     }
-    let mut provider = provider([response(201, json!({}))]);
-    provider.token = None;
+    let mut provider = uninitialized_provider([response(201, json!({}))]);
     assert!(matches!(
         provider.initialize(&BTreeMap::new()).unwrap(),
         ReferenceScope::Unavailable
     ));
     assert!(provider.api.requests.borrow().is_empty());
+    // Initialization itself must mask later diagnostics, before the first send.
+    let failure = ProviderError::internal_caused_by(
+        carina_core::provider_text::ProviderText::new(format!(
+            "diagnostic after initialization {TEST_TOKEN}"
+        )),
+        std::io::Error::other(format!("nested cause {TEST_TOKEN}")),
+    );
+    let wire = failure
+        .with_secrets_for_test(&provider.api.context)
+        .to_wire();
+    assert_eq!(wire.message, "diagnostic after initialization (secret)");
+    assert_eq!(wire.cause.as_deref(), Some("nested cause (secret)"));
+    assert!(provider.api.registered_requests.borrow().is_empty());
     dispatch_create(&provider, &id(), create_request(None)).unwrap();
+    assert_eq!(provider.api.registered_requests.borrow().len(), 1);
+}
+
+#[test]
+fn failed_registration_clears_the_previous_token_and_never_sends() {
+    if !initialization_in_child(
+        "tests::failed_registration_clears_the_previous_token_and_never_sends",
+        Some(std::ffi::OsStr::new(TEST_TOKEN)),
+    ) {
+        return;
+    }
+    let mut provider = provider([]);
+    // Closing the owner makes acknowledgement fail, even for an old generation.
+    provider.api.context = provider_text::context(&[]);
+    let failure = provider.initialize(&BTreeMap::new()).unwrap_err();
+    assert_eq!(failure.kind(), ProviderErrorKind::Internal);
+    assert!(failure.detail().cause().unwrap().is::<RegistrationError>());
+    let wire = failure
+        .with_secrets_for_test(&provider.api.context)
+        .to_wire();
+    assert_eq!(
+        wire.message,
+        "GitHub provider configuration: failed to register GITHUB_TOKEN"
+    );
+    assert_eq!(
+        wire.cause.as_deref(),
+        Some("protected-material context is closed")
+    );
+    assert!(!serde_json::to_string(&wire).unwrap().contains(TEST_TOKEN));
+    assert!(provider.token.is_none());
+    assert!(dispatch_create(&provider, &id(), create_request(None)).is_err());
+    assert!(provider.api.requests.borrow().is_empty());
+    assert!(provider.api.registered_requests.borrow().is_empty());
+}
+
+#[test]
+fn typed_diagnostics_mask_the_initialized_token_before_any_request() {
+    use carina_core::provider::ProviderPlan;
+    use carina_core::provider_text::present_event;
+    use carina_core::test_utils::provider_text::captured_session;
+    use carina_plugin_sdk::{EventLevel, ProviderEvent};
+
+    if !initialization_in_child(
+        "tests::typed_diagnostics_mask_the_initialized_token_before_any_request",
+        Some(std::ffi::OsStr::new(TEST_TOKEN)),
+    ) {
+        return;
+    }
+    let (session, events) =
+        captured_session(ProviderPlan::state_only().session_builder("github", None, None));
+    let diagnostics = ProviderDiagnostics::from_session(&session);
+    let mut provider = uninitialized_provider([]);
+    provider.diagnostics = Some(diagnostics.clone());
+    provider.initialize(&BTreeMap::new()).unwrap();
+    let failure = ProviderError::api_error_caused_by(
+        carina_core::provider_text::ProviderText::new(format!("retry after {TEST_TOKEN}")),
+        std::io::Error::other(format!("nested {TEST_TOKEN}")),
+    )
+    .with_request_id(TEST_TOKEN);
+    diagnostics.emit(ProviderEvent::failure(
+        EventLevel::Warn,
+        "retry".into(),
+        &failure,
+    ));
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    let text = present_event(&events[0]).to_string();
+    assert!(text.contains("retry after (secret)"));
+    assert!(text.contains("nested (secret)"));
+    assert!(!text.contains(TEST_TOKEN));
+    assert!(provider.api.registered_requests.borrow().is_empty());
+}
+
+#[test]
+fn reinitialization_keeps_older_tokens_masked_in_returned_errors() {
+    const PREVIOUS_TOKEN: &str = "previous_github_token_canary";
+    if !initialization_in_child(
+        "tests::reinitialization_keeps_older_tokens_masked_in_returned_errors",
+        Some(std::ffi::OsStr::new(TEST_TOKEN)),
+    ) {
+        return;
+    }
+    let mut provider = uninitialized_provider([Ok(Response::builder()
+        .status(401)
+        .header("x-github-request-id", PREVIOUS_TOKEN)
+        .body(
+            serde_json::to_vec(
+                &json!({"message": format!("rejected {PREVIOUS_TOKEN} and {TEST_TOKEN}")}),
+            )
+            .unwrap(),
+        )
+        .unwrap())]);
+    provider.token = Some(
+        provider
+            .diagnostics
+            .as_ref()
+            .unwrap()
+            .register_github_token(GithubTokenMaterial::new(PREVIOUS_TOKEN.into()))
+            .unwrap(),
+    );
+    provider.initialize(&BTreeMap::new()).unwrap();
+    let failure = provider
+        .read(&id(), &identifier(), ReadRequest)
+        .unwrap_err();
+    let wire = failure
+        .with_secrets_for_test(&provider.api.context)
+        .to_wire();
+    assert_eq!(
+        wire.message,
+        "GitHub API returned HTTP 401 Unauthorized: rejected (secret) and (secret)"
+    );
+    assert_eq!(wire.request_id.as_deref(), Some("(secret)"));
+    let json = serde_json::to_string(&wire).unwrap();
+    assert!(!json.contains(TEST_TOKEN));
+    assert!(!json.contains(PREVIOUS_TOKEN));
 }
 
 #[test]
 fn invalid_token_header_is_a_redacted_configuration_error() {
     let secret = "secret\ninvalid-header";
-    let message = GithubToken::new(secret.into()).unwrap_err();
+    if !initialization_in_child(
+        "tests::invalid_token_header_is_a_redacted_configuration_error",
+        Some(std::ffi::OsStr::new(secret)),
+    ) {
+        return;
+    }
+    let mut provider = provider([]);
+    let failure = provider.initialize(&BTreeMap::new()).unwrap_err();
+    assert_eq!(failure.kind(), ProviderErrorKind::InvalidInput);
+    assert!(
+        failure
+            .detail()
+            .cause()
+            .unwrap()
+            .is::<http::header::InvalidHeaderValue>()
+    );
+    let message = failure
+        .with_secrets_for_test(&provider.api.context)
+        .to_wire()
+        .message;
     assert!(message.contains("GITHUB_TOKEN"));
+    assert_eq!(
+        message,
+        "GitHub provider configuration: GITHUB_TOKEN is not a valid authorization header"
+    );
     assert!(!message.contains(secret));
+    assert!(provider.token.is_none());
+    assert!(dispatch_create(&provider, &id(), create_request(None)).is_err());
+    assert!(provider.api.registered_requests.borrow().is_empty());
 }
 
 fn core_keys(keys: &[&str]) -> CoreValue {
@@ -1191,6 +1432,8 @@ fn schema_use_default_is_provider_populated_bool() {
 
 #[test]
 fn schema_rejects_authored_use_default() {
+    use carina_core::resource::knowledge::KnowledgeContext;
+    use carina_core::test_utils::admit_resource_attributes;
     use carina_plugin_sdk::core::provider::{
         BoxFuture, CanonicalProviderConfigAttributes, InitializeOutcomeMint, ProviderFactory,
         ProviderInitialization, ProviderResult, ProviderSession, ProviderValidationInputs,
@@ -1255,17 +1498,28 @@ fn schema_rejects_authored_use_default() {
             "repository".into(),
             CoreValue::Concrete(ConcreteValue::String(REPOSITORY.into())),
         )]);
-    schema
-        .validate_with_resolver(&attrs, &|_| false, &resolver)
-        .unwrap();
+    let classified = attrs
+        .iter()
+        .map(|(name, value)| {
+            let value = value.knowledge(&KnowledgeContext::validation()).unwrap();
+            (name.clone(), value.into_classification())
+        })
+        .collect();
+    admit_resource_attributes(schema, &classified, &|_| false, &resolver).unwrap();
     for value in [true, false] {
         attrs.insert(
             "use_default".into(),
             CoreValue::Concrete(ConcreteValue::Bool(value)),
         );
-        let errors = schema
-            .validate_with_resolver(&attrs, &|_| false, &resolver)
-            .unwrap_err();
+        let classified = attrs
+            .iter()
+            .map(|(name, value)| {
+                let value = value.knowledge(&KnowledgeContext::validation()).unwrap();
+                (name.clone(), value.into_classification())
+            })
+            .collect();
+        let errors =
+            admit_resource_attributes(schema, &classified, &|_| false, &resolver).unwrap_err();
         assert!(errors.iter().any(
             |error| matches!(error, TypeError::ReadOnlyAttribute { name } if name == "use_default")
         ));

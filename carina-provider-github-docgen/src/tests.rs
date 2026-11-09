@@ -190,15 +190,15 @@ fn schema_patterns_defaults_enum_values_and_transforms_keep_their_spelling() {
         literal.to_string(),
         format_value(&default),
         format!("github.test.Literals.Transformed (DSL transform: {transform:?})"),
-        format!("String (pattern: ^[a-z|`]+$, DSL transform: {transform:?})"),
+        format!("String (pattern: /^[a-z|`]+$/ (Full), DSL transform: {transform:?})"),
         format!("{transform:?}"),
         "github.test.Literals.ClosedTransformed.value".into(),
         format!("value{literal}"),
     ] {
         assert!(code.contains(&expected), "missing {expected:?}: {page}");
     }
-    assert!(page.contains("pattern: ^[a-z|`]+$"));
-    assert!(page.contains(r"pattern: ^[a-z\|`]+$"));
+    assert!(page.contains("pattern: /^[a-z|`]+$/ (Full)"));
+    assert!(page.contains(r"pattern: /^[a-z\|`]+$/ (Full)"));
     assert!(!page.contains("\\u{5b}"));
     let paragraphs = rendered_paragraphs(&page);
     assert!(
@@ -214,7 +214,9 @@ fn schema_patterns_defaults_enum_values_and_transforms_keep_their_spelling() {
 #[test]
 fn link_shaped_literals_round_trip_as_code() {
     for literal in ["^[a](b)$", "a|b", "`a``b`"] {
-        let pattern = format!("String (pattern: {literal})");
+        let pattern = format!(
+            "String (pattern: /{literal}/ (Substring: Preserve the fixture's original regex search semantics.))"
+        );
         let spec = PatternSpec::new(
             literal,
             PatternMatch::Substring {
@@ -315,9 +317,9 @@ fn real_oidc_subject_page_matches_the_schema_and_registry_shape() {
     };
     assert_eq!(pattern.mode(), &PatternMatch::Full);
     let pattern = pattern.as_str();
-    assert!(page.contains(&format!("(pattern: {pattern})`")));
+    assert!(page.contains(&format!("(pattern: /{pattern}/ (Full))`")));
     assert!(rendered_code(page).contains(&format!(
-        "github.actions.OidcSubject.Repository (pattern: {pattern})"
+        "github.actions.OidcSubject.Repository (pattern: /{pattern}/ (Full))"
     )));
     assert!(page.contains(resource.description().unwrap()));
     assert!(page.contains(include_str!("../../examples/actions/oidc_subject/main.crn")));
@@ -670,7 +672,7 @@ fn aliases_reject_cycles_and_preserve_recursive_definitions() {
         "| `children` | List\\<[Struct(Node)](#node)\\> (ordered)",
         "| 1 | [Struct(Node)](#node) |",
         "| 2 | `Int (range: -3..=42)` |",
-        "Map\\<`Key (pattern: ^key$, len: ..=8)`, `Float (range: ..=0.5)`\\>",
+        "Map\\<`Key (pattern: /^key$/ (Full), len: ..=8)`, `Float (range: ..=0.5)`\\>",
         "## Recursive Type Definitions",
         "[Recursive type (Items)](#items)",
     ] {

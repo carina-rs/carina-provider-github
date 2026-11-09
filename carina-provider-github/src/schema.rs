@@ -1,7 +1,9 @@
+use carina_plugin_sdk::core::provider_text::ProviderDiagnostic;
 use carina_plugin_sdk::core::schema::{
     AttributeSchema, AttributeType, ListElements, PatternMatch, PatternSpec, ResourceSchema,
     TypeIdentity, ValidatedResourceSchema,
 };
+use carina_plugin_sdk::expect_diagnostic;
 
 pub(crate) const CLAIM_KEYS: &[&str] = &[
     "repo",
@@ -38,7 +40,7 @@ pub(crate) const CLAIM_KEYS: &[&str] = &[
 ];
 
 pub(crate) fn oidc_subject() -> ValidatedResourceSchema {
-    ResourceSchema::new("actions.OidcSubject")
+    expect_diagnostic(ResourceSchema::new("actions.OidcSubject")
         .with_description("A repository's GitHub Actions OIDC subject claim customization")
         .attribute(
             AttributeSchema::required(
@@ -89,5 +91,5 @@ pub(crate) fn oidc_subject() -> ValidatedResourceSchema {
         )
         .default_prevent_destroy()
         .validate()
-        .expect("the OIDC subject schema is valid")
+        .map_err(ProviderDiagnostic::new))
 }

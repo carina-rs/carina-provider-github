@@ -5,15 +5,17 @@
 pub mod api;
 mod schema;
 
-use api::{GithubApi, GithubToken, HttpGithubApi, TransportError};
+use api::{GithubApi, HttpGithubApi, TransportError};
 use carina_plugin_sdk::core::schema::{
     AssignabilityEdge, ReferenceForms, ValidatedConfigSchema, ValidatedResourceSchema,
 };
+use carina_plugin_sdk::protected_material::{GithubTokenMaterial, RegisteredGithubToken};
 use carina_plugin_sdk::types::*;
 use carina_plugin_sdk::{
     CarinaProvider, CreateAttempt, CreateStep, CreateVerdict, DeleteOutcome, DesiredResource,
     DesiredScalar, DesiredValue, DesiredView, Never, NormalizedResource, Pending, PendingDelete,
-    PlanOp, Poll, PollRequest, PollVerdict, Resume, ResumeStep, ResumeVerdict, Sent, UpdateOutcome,
+    PlanOp, Poll, PollRequest, PollVerdict, ProviderDiagnostics, Resume, ResumeStep, ResumeVerdict,
+    Sent, UpdateOutcome,
 };
 use http::{Method, Request, Response};
 use serde::Deserialize;
@@ -34,7 +36,13 @@ pub fn assignability_edges() -> Vec<AssignabilityEdge> {
 #[derive(Default)]
 pub struct GithubProvider<A = HttpGithubApi> {
     api: A,
-    token: Option<GithubToken>,
+    token: Option<RegisteredGithubToken>,
+    #[cfg(not(target_arch = "wasm32"))]
+    diagnostics: Option<ProviderDiagnostics>,
+    // RegisteredRequest intentionally exposes no plaintext request. Observe only
+    // the unsigned request in native tests; the fake still receives its capability.
+    #[cfg(test)]
+    unsigned_requests: std::rc::Rc<std::cell::RefCell<Vec<Request<Vec<u8>>>>>,
 }
 
 impl<A> fmt::Debug for GithubProvider<A> {
@@ -43,20 +51,6 @@ impl<A> fmt::Debug for GithubProvider<A> {
             .debug_struct("GithubProvider")
             .field("token", &self.token)
             .finish_non_exhaustive()
-    }
-}
-
-fn error(kind: ProviderErrorKind, message: impl Into<String>) -> ProviderError {
-    ProviderError {
-        kind,
-        message: message.into(),
-        resource_id: None,
-        cause: None,
-        provider_name: Some("github".into()),
-        operation: None,
-        status: None,
-        code: None,
-        request_id: None,
     }
 }
 
@@ -102,19 +96,19 @@ fn validate_repository(repository: &str) -> Result<(), ProviderError> {
     if valid {
         Ok(())
     } else {
-        Err(error(
-            ProviderErrorKind::InvalidInput,
+        Err(ProviderError::invalid_input(
             "repository must match owner/repo (letters, digits and GitHub name punctuation only)",
-        ))
+        )
+        .for_provider("github"))
     }
 }
 
 fn claim_keys(value: &Value) -> Result<Vec<String>, ProviderError> {
     let invalid = || {
-        error(
-            ProviderErrorKind::InvalidInput,
+        ProviderError::invalid_input(
             "claim_keys must be a non-empty list of github.actions.OidcSubject.ClaimKey values",
         )
+        .for_provider("github")
     };
     let values: Vec<&str> = match value {
         Value::StringList(keys) => keys.iter().map(String::as_str).collect(),
@@ -164,10 +158,8 @@ fn normalized_use_default(view: &mut DesiredView<'_>) -> Result<(), ProviderErro
     }
     let value = DesiredValue::Known(DesiredScalar::Bool(view.attribute("claim_keys").is_none()));
     view.insert_absent("use_default", value).map_err(|failure| {
-        error(
-            ProviderErrorKind::Internal,
-            format!("failed to normalize OIDC subject: {failure}"),
-        )
+        ProviderError::internal_caused_by("failed to normalize OIDC subject", failure)
+            .for_provider("github")
     })
 }
 
@@ -180,14 +172,13 @@ impl<A: GithubApi> GithubProvider<A> {
         state_presence: StatePresence,
     ) -> Result<Response<Vec<u8>>, ApiFailure> {
         validate_repository(repository)?;
-        let token = self.token.as_ref().ok_or_else(|| error(ProviderErrorKind::InvalidInput, "GitHub provider configuration: initialize with a non-empty GITHUB_TOKEN before making requests"))?;
+        let token = self.token.as_ref().ok_or_else(|| ProviderError::invalid_input("GitHub provider configuration: initialize with a non-empty GITHUB_TOKEN before making requests").for_provider("github"))?;
         let operation = format!("actions.OidcSubject.{method}");
         let mut request = Request::builder()
             .method(method.clone())
             .uri(format!(
                 "https://api.github.com/repos/{repository}/actions/oidc/customization/sub"
             ))
-            .header("Authorization", token.authorization())
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header(
@@ -200,37 +191,36 @@ impl<A: GithubApi> GithubProvider<A> {
                 Some(keys) => json!({"use_default": false, "include_claim_keys": keys}),
                 None => json!({"use_default": true}),
             };
-            serde_json::to_vec(&body).map_err(|_| {
-                error(
-                    ProviderErrorKind::Internal,
-                    "failed to encode OIDC subject request",
-                )
+            serde_json::to_vec(&body).map_err(|failure| {
+                ProviderError::internal_caused_by("failed to encode OIDC subject request", failure)
+                    .for_provider("github")
             })?
         } else {
             Vec::new()
         };
-        let request = request.body(body).map_err(|_| {
-            error(
-                ProviderErrorKind::Internal,
-                "failed to build GitHub HTTP request",
-            )
+        let request = request.body(body).map_err(|failure| {
+            ProviderError::internal_caused_by("failed to build GitHub HTTP request", failure)
+                .for_provider("github")
+        })?;
+        #[cfg(test)]
+        self.unsigned_requests.borrow_mut().push(request.clone());
+        let request = token.authorize(request).map_err(|failure| {
+            ProviderError::internal_caused_by("failed to authorize GitHub HTTP request", failure)
+                .for_provider("github")
+                .with_operation(operation.clone())
         })?;
         let response = self.api.send(request).map_err(|failure| ApiFailure {
             uncertain: failure == TransportError::MaybeSent,
-            error: ProviderError {
-                operation: Some(operation.clone()),
-                ..error(
-                    ProviderErrorKind::ApiError,
-                    match failure {
-                        TransportError::NotSent => {
-                            "GitHub HTTP transport failed before sending the request"
-                        }
-                        TransportError::MaybeSent => {
-                            "GitHub HTTP transport failed; request outcome is unknown"
-                        }
-                    },
-                )
-            },
+            error: ProviderError::api_error(match failure {
+                TransportError::NotSent => {
+                    "GitHub HTTP transport failed before sending the request"
+                }
+                TransportError::MaybeSent => {
+                    "GitHub HTTP transport failed; request outcome is unknown"
+                }
+            })
+            .for_provider("github")
+            .with_operation(operation.clone()),
         })?;
         let status = response.status();
         if status.is_success() {
@@ -243,16 +233,15 @@ impl<A: GithubApi> GithubProvider<A> {
             .and_then(|body| body.get("message"))
             .and_then(serde_json::Value::as_str)
         {
-            Some(message) => format!(
-                "GitHub API returned HTTP {status}: {}",
-                token.redact(message)
-            ),
+            // The host binds this opaque error using the token inventory populated
+            // before authorization, including echoes in messages and request IDs.
+            Some(message) => format!("GitHub API returned HTTP {status}: {message}"),
             None => format!(
                 "GitHub API returned HTTP {status} with no error message in the body ({} bytes)",
                 response.body().len()
             ),
         };
-        let kind = match status.as_u16() {
+        let failure = match status.as_u16() {
             404 => {
                 // The CLI converts NotFound errors to absent state, but GitHub's
                 // 404 also covers missing repository access or request permissions.
@@ -267,26 +256,28 @@ impl<A: GithubApi> GithubProvider<A> {
                          `removed { from = ... }` block.",
                     );
                 }
-                ProviderErrorKind::ApiError
+                ProviderError::api_error(message)
             }
-            400 | 422 => ProviderErrorKind::InvalidInput,
-            408 | 504 => ProviderErrorKind::Timeout,
-            _ => ProviderErrorKind::ApiError,
+            400 | 422 => ProviderError::invalid_input(message),
+            408 | 504 => ProviderError::timeout(message),
+            _ => ProviderError::api_error(message),
+        }
+        .for_provider("github")
+        .with_operation(operation)
+        .with_status(status.as_u16());
+        let failure = match response
+            .headers()
+            .get("x-github-request-id")
+            .and_then(|value| value.to_str().ok())
+        {
+            Some(request_id) => failure.with_request_id(request_id),
+            None => failure,
         };
         Err(ApiFailure {
             // A redirect is deliberately not followed and also is not proof
             // that the mutation was rejected. Only definite 4xx yields NotCreated.
             uncertain: !status.is_client_error(),
-            error: ProviderError {
-                operation: Some(operation),
-                status: Some(status.as_u16()),
-                request_id: response
-                    .headers()
-                    .get("x-github-request-id")
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_owned),
-                ..error(kind, message)
-            },
+            error: failure,
         })
     }
 
@@ -303,11 +294,12 @@ impl<A: GithubApi> GithubProvider<A> {
                 StatePresence::InState,
             )
             .map_err(|failure| failure.error)?;
-        let subject: OidcSubject = serde_json::from_slice(response.body()).map_err(|_| {
-            error(
-                ProviderErrorKind::ApiError,
+        let subject: OidcSubject = serde_json::from_slice(response.body()).map_err(|failure| {
+            ProviderError::api_error_caused_by(
                 "GitHub returned an invalid OIDC subject response",
+                failure,
             )
+            .for_provider("github")
         })?;
         Ok(ReadOutcome::Found {
             state: AppliedState {
@@ -366,21 +358,47 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
     ) -> Result<ReferenceScope, ProviderError> {
         self.token = None;
         let token = std::env::var("GITHUB_TOKEN").map_err(|failure| {
-            error(
-                ProviderErrorKind::InvalidInput,
-                match failure {
-                    std::env::VarError::NotPresent => {
-                        "GitHub provider configuration: GITHUB_TOKEN must be set and non-empty"
-                    }
-                    std::env::VarError::NotUnicode(_) => {
-                        "GitHub provider configuration: GITHUB_TOKEN is not valid Unicode"
-                    }
-                },
-            )
+            ProviderError::invalid_input(match failure {
+                std::env::VarError::NotPresent => {
+                    "GitHub provider configuration: GITHUB_TOKEN must be set and non-empty"
+                }
+                std::env::VarError::NotUnicode(_) => {
+                    "GitHub provider configuration: GITHUB_TOKEN is not valid Unicode"
+                }
+            })
+            .for_provider("github")
         })?;
-        let token = GithubToken::new(token)
-            .map_err(|message| error(ProviderErrorKind::InvalidInput, message))?;
-        self.token = Some(token);
+        if token.is_empty() {
+            return Err(ProviderError::invalid_input(
+                "GitHub provider configuration: GITHUB_TOKEN must be set and non-empty",
+            )
+            .for_provider("github"));
+        }
+        http::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|failure| {
+            ProviderError::invalid_input_caused_by(
+                "GitHub provider configuration: GITHUB_TOKEN is not a valid authorization header",
+                failure,
+            )
+            .for_provider("github")
+        })?;
+        #[cfg(target_arch = "wasm32")]
+        let diagnostics = ProviderDiagnostics::guest();
+        #[cfg(not(target_arch = "wasm32"))]
+        let diagnostics = self.diagnostics.as_ref().ok_or_else(|| {
+            ProviderError::internal("GitHub provider initialization requires session diagnostics")
+                .for_provider("github")
+        })?;
+        self.token = Some(
+            diagnostics
+                .register_github_token(GithubTokenMaterial::new(token))
+                .map_err(|failure| {
+                    ProviderError::internal_caused_by(
+                        "GitHub provider configuration: failed to register GITHUB_TOKEN",
+                        failure,
+                    )
+                    .for_provider("github")
+                })?,
+        );
         Ok(ReferenceScope::Unavailable)
     }
 
@@ -408,10 +426,7 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
     }
 
     fn read_data_source(&self, _resource: &Resource) -> Result<State, ProviderError> {
-        Err(error(
-            ProviderErrorKind::InvalidInput,
-            "github has no data sources",
-        ))
+        Err(ProviderError::invalid_input("github has no data sources").for_provider("github"))
     }
 
     fn create(
@@ -424,17 +439,17 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
             let repository = match request.resource.attributes.get("repository") {
                 Some(Value::String(repository)) => repository,
                 _ => {
-                    return Err(error(
-                        ProviderErrorKind::InvalidInput,
+                    return Err(ProviderError::invalid_input(
                         "repository is required and must be an owner/repo string",
-                    ));
+                    )
+                    .for_provider("github"));
                 }
             };
             let identifier = AppliedIdentifier::new(repository.clone()).map_err(|_| {
-                error(
-                    ProviderErrorKind::InvalidInput,
+                ProviderError::invalid_input(
                     "repository is required and must be an owner/repo string",
                 )
+                .for_provider("github")
             })?;
             let keys = request
                 .resource
@@ -510,10 +525,10 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
         // Validate the entire patch before transmitting any mutation.
         for op in &request.patch.ops {
             if !matches!(op.key(), "claim_keys" | "use_default") {
-                return Err(error(
-                    ProviderErrorKind::InvalidInput,
+                return Err(ProviderError::invalid_input(
                     "only claim_keys and use_default can be updated; repository is create-only",
-                ));
+                )
+                .for_provider("github"));
             }
         }
         let mut state = request.state_after_patch();
@@ -523,23 +538,22 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
                 Some(PersistedValue::Bool(use_default)) => *use_default,
                 None => !state.attributes.contains_key("claim_keys"),
                 _ => {
-                    return Err(error(
-                        ProviderErrorKind::InvalidInput,
-                        "use_default must be a boolean",
-                    ));
+                    return Err(
+                        ProviderError::invalid_input("use_default must be a boolean")
+                            .for_provider("github"),
+                    );
                 }
             };
             let keys = if use_default {
                 None
             } else {
                 let value = state.attributes.get("claim_keys").ok_or_else(|| {
-                    error(
-                        ProviderErrorKind::InvalidInput,
-                        "claim_keys is required when use_default is false",
-                    )
+                    ProviderError::invalid_input("claim_keys is required when use_default is false")
+                        .for_provider("github")
                 })?;
                 let value = value.to_value().map_err(|failure| {
-                    error(ProviderErrorKind::InvalidInput, failure.to_string())
+                    ProviderError::from_diagnostic(ProviderErrorKind::InvalidInput, failure)
+                        .for_provider("github")
                 })?;
                 Some(claim_keys(&value)?)
             };
@@ -566,7 +580,7 @@ impl<A: GithubApi> CarinaProvider for GithubProvider<A> {
             }
         }
         Ok(UpdateOutcome::Done(
-            carina_plugin_sdk::protocol::UpdateOutcome::Success {
+            carina_plugin_sdk::types::UpdateOutcome::Success {
                 state: AppliedPersistedState {
                     id: id.clone(),
                     identifier: identifier.clone(),
