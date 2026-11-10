@@ -95,7 +95,7 @@ jobs:
 
   wasm-build:
     name: WASM Build
-    uses: carina-rs/provider-release/.github/workflows/build.yml@25d0c075c00be49a703b532c91739cc5dc163fb4
+    uses: carina-rs/provider-release/.github/workflows/build.yml@23f693069e0481ce3d49a6d55d1a0658ea113917
     with:
       provider: carina-provider-github
       name: github
