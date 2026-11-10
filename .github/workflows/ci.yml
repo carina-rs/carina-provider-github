@@ -111,6 +111,14 @@ jobs:
       - uses: actions/checkout@v4
       - run: bash scripts/check-carina-pin.sh
 
+  provider-release-pin:
+    name: Check provider-release Pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-provider-release-pin.sh
+      - run: bash scripts/test-check-provider-release-pin.sh
+
   sdk-bindings:
     name: Check SDK bindings
     runs-on: ubuntu-latest
@@ -132,7 +140,7 @@ jobs:
 
   publish-dev:
     name: Publish to Carina Registry (dev)
-    needs: [check, test, clippy, fmt, docs-drift, docs-bundle, wasm-build, carina-pin, sdk-bindings, test-utils-dev-only]
+    needs: [check, test, clippy, fmt, docs-drift, docs-bundle, wasm-build, carina-pin, provider-release-pin, sdk-bindings, test-utils-dev-only]
     if: github.repository == 'carina-rs/carina-provider-github' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
