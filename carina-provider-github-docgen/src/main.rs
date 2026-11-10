@@ -377,17 +377,13 @@ fn declaration_key(root: &CompiledAttributeType) -> Result<String> {
     while let Some(ty) = pending.pop() {
         let validator = match ty.raw_shape() {
             RawShape::String {
-                identity: _identity,
-                pattern: _pattern,
-                length: _length,
-                validate,
-                to_dsl: _to_dsl,
-            } => validate,
+                identity_layer,
+                member_layer: _member_layer,
+            } => identity_layer.validate,
             RawShape::Int {
-                identity: _identity,
-                range: _range,
-                validate,
-            } => validate,
+                identity_layer,
+                member_layer: _member_layer,
+            } => identity_layer.validate,
             RawShape::Float {
                 identity: _identity,
                 range: _range,
@@ -420,6 +416,7 @@ fn declaration_key(root: &CompiledAttributeType) -> Result<String> {
                 name: _name,
                 fields: _fields,
                 field_groups: _field_groups,
+                input_rules: _input_rules,
             } => None,
             RawShape::Bool | RawShape::Duration => None,
             RawShape::Union(_members) => None,
@@ -457,6 +454,7 @@ fn children(ty: &CompiledAttributeType) -> Result<Vec<(String, &CompiledAttribut
             name: _name,
             fields,
             field_groups: _field_groups,
+            input_rules: _input_rules,
         } => fields
             .iter()
             .map(|field| (field.name().into(), field.field_type()))
@@ -472,16 +470,12 @@ fn children(ty: &CompiledAttributeType) -> Result<Vec<(String, &CompiledAttribut
             length: _length,
         } => vec![],
         RawShape::String {
-            identity: _identity,
-            pattern: _pattern,
-            length: _length,
-            validate: _validate,
-            to_dsl: _to_dsl,
+            identity_layer: _identity_layer,
+            member_layer: _member_layer,
         } => vec![],
         RawShape::Int {
-            identity: _identity,
-            range: _range,
-            validate: _validate,
+            identity_layer: _identity_layer,
+            member_layer: _member_layer,
         } => vec![],
         RawShape::Float {
             identity: _identity,
@@ -589,6 +583,7 @@ impl<'a> SchemaTypes<'a> {
                     name,
                     fields: _fields,
                     field_groups: _field_groups,
+                    input_rules: _input_rules,
                 } => name.to_string(),
                 RawShape::List {
                     element_type: _element_type,
@@ -607,16 +602,12 @@ impl<'a> SchemaTypes<'a> {
                     length: _length,
                 } => continue,
                 RawShape::String {
-                    identity: _identity,
-                    pattern: _pattern,
-                    length: _length,
-                    validate: _validate,
-                    to_dsl: _to_dsl,
+                    identity_layer: _identity_layer,
+                    member_layer: _member_layer,
                 } => continue,
                 RawShape::Int {
-                    identity: _identity,
-                    range: _range,
-                    validate: _validate,
+                    identity_layer: _identity_layer,
+                    member_layer: _member_layer,
                 } => continue,
                 RawShape::Float {
                     identity: _identity,

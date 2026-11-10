@@ -88,8 +88,8 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "carina-core"
-version = "0.13.1"
-source = "git+https://github.com/carina-rs/carina?rev=375ce42450e41af53a56da110c4ce146d46627e7#375ce42450e41af53a56da110c4ce146d46627e7"
+version = "0.14.0"
+source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
 dependencies = [
  "argon2",
  "carina-provider-protocol",
@@ -116,12 +116,13 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "yoke",
 ]
 
 [[package]]
 name = "carina-docgen"
 version = "0.10.0"
-source = "git+https://github.com/carina-rs/carina-provider-aws?rev=516548de1d23d60b62ff6ae6a59c9478e29f5af0#516548de1d23d60b62ff6ae6a59c9478e29f5af0"
+source = "git+https://github.com/carina-rs/carina-provider-aws?rev=69fef8545d08bc18efbf3f8bf19df7b6d6a61bca#69fef8545d08bc18efbf3f8bf19df7b6d6a61bca"
 dependencies = [
  "anyhow",
  "carina-core",
@@ -132,16 +133,16 @@ dependencies = [
 
 [[package]]
 name = "carina-plugin-bindings-diagnostics"
-version = "0.13.1"
-source = "git+https://github.com/carina-rs/carina?rev=375ce42450e41af53a56da110c4ce146d46627e7#375ce42450e41af53a56da110c4ce146d46627e7"
+version = "0.14.0"
+source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
 dependencies = [
  "wit-bindgen 0.54.0",
 ]
 
 [[package]]
 name = "carina-plugin-bindings-http"
-version = "0.13.1"
-source = "git+https://github.com/carina-rs/carina?rev=375ce42450e41af53a56da110c4ce146d46627e7#375ce42450e41af53a56da110c4ce146d46627e7"
+version = "0.14.0"
+source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
 dependencies = [
  "carina-plugin-bindings-diagnostics",
  "wasi 0.14.7+wasi-0.2.4",
@@ -150,8 +151,8 @@ dependencies = [
 
 [[package]]
 name = "carina-plugin-bindings-provider"
-version = "0.13.1"
-source = "git+https://github.com/carina-rs/carina?rev=375ce42450e41af53a56da110c4ce146d46627e7#375ce42450e41af53a56da110c4ce146d46627e7"
+version = "0.14.0"
+source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
 dependencies = [
  "carina-plugin-bindings-diagnostics",
  "wit-bindgen 0.54.0",
@@ -159,8 +160,8 @@ dependencies = [
 
 [[package]]
 name = "carina-plugin-sdk"
-version = "0.13.1"
-source = "git+https://github.com/carina-rs/carina?rev=375ce42450e41af53a56da110c4ce146d46627e7#375ce42450e41af53a56da110c4ce146d46627e7"
+version = "0.14.0"
+source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
 dependencies = [
  "carina-core",
  "carina-plugin-bindings-diagnostics",
@@ -199,7 +200,7 @@ dependencies = [
 [[package]]
 name = "carina-provider-protocol"
 version = "0.3.0"
-source = "git+https://github.com/carina-rs/carina?rev=375ce42450e41af53a56da110c4ce146d46627e7#375ce42450e41af53a56da110c4ce146d46627e7"
+source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
 dependencies = [
  "psl",
  "serde",
@@ -971,6 +972,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
+name = "stable_deref_trait"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
 name = "stacker"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1009,6 +1016,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "synstructure"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -1437,6 +1455,50 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "yoke"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72d6e5c6afb84d73944e5cedb052c4680d5657337201555f9f2a16b7406d4954"
+dependencies = [
+ "stable_deref_trait",
+ "yoke-derive",
+ "zerofrom",
+]
+
+[[package]]
+name = "yoke-derive"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+ "synstructure",
+]
+
+[[package]]
+name = "zerofrom"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272"
+dependencies = [
+ "zerofrom-derive",
+]
+
+[[package]]
+name = "zerofrom-derive"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f75b4683f6c7f45248d4d64056a24298c6281e0993356d7d1b4a1a962ef10d4a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+ "synstructure",
 ]
 
 [[package]]
