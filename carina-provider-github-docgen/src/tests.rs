@@ -306,15 +306,15 @@ fn real_oidc_subject_page_matches_the_schema_and_registry_shape() {
     let schemas = resource_schemas();
     let resource = schemas[0].as_schema();
     let RawShape::String {
-        identity: _identity,
-        pattern: Some(pattern),
-        length: _length,
-        validate: _validate,
-        to_dsl: _to_dsl,
+        identity_layer,
+        member_layer: _member_layer,
     } = resource.attributes()["repository"].attr_type().raw_shape()
     else {
         panic!("repository must declare its pattern")
     };
+    let pattern = identity_layer
+        .pattern
+        .expect("repository must declare its pattern");
     assert_eq!(pattern.mode(), &PatternMatch::Full);
     let pattern = pattern.as_str();
     assert!(page.contains(&format!("(pattern: /{pattern}/ (Full))`")));
