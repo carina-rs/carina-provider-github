@@ -326,7 +326,7 @@ fn real_oidc_subject_page_matches_the_schema_and_registry_shape() {
     assert!(page.contains("Destruction protection is enabled by default."));
     let (arguments, attributes) = page.split_once("## Attribute Reference\n").unwrap();
     assert!(arguments.contains("- **Required:** Yes\n- **Create-only:** Yes\n- **Identity:** Required (omitting this value leaves identity incomplete)"));
-    assert!(arguments.contains("List\\<[github.actions.OidcSubject.ClaimKey](#githubactionsoidcsubjectclaimkey)\\> (items: 1.., unique items, ordered)"));
+    assert!(arguments.contains("List\\<[github.actions.OidcSubject.ClaimKey](#githubactionsoidcsubjectclaimkey)\\> (items: 1..unbounded, unique items, ordered)"));
     assert!(!arguments.contains("### `use_default`"));
     assert!(attributes.contains("### `use_default`\n\n- **Type:** `Bool`\n- **Read-only**"));
     assert!(page.contains("| `github.actions.OidcSubject.ClaimKey.repo` | `repo` |"));
@@ -672,7 +672,7 @@ fn aliases_reject_cycles_and_preserve_recursive_definitions() {
         "| `children` | List\\<[Struct(Node)](#node)\\> (ordered)",
         "| 1 | [Struct(Node)](#node) |",
         "| 2 | `Int (range: -3..=42)` |",
-        "Map\\<`Key (pattern: /^key$/ (Full), len: ..=8)`, `Float (range: ..=0.5)`\\>",
+        "Map\\<`Key (pattern: /^key$/ (Full), len: unbounded..=8)`, `Float (range: unbounded..=0.5)`\\>",
         "## Recursive Type Definitions",
         "[Recursive type (Items)](#items)",
     ] {
