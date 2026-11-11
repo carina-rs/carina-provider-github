@@ -19,6 +19,7 @@ write_fixture() {
     rm -rf "$fixture_dir/.github"
     mkdir -p "$workflows_dir"
     printf '1.95.0\n' > "$fixture_dir/.github/wasm-toolchain"
+    printf '[toolchain]\nchannel = "1.95.0"\n' > "$fixture_dir/rust-toolchain.toml"
     for workflow in ci release; do
         write_build "$workflow" "${1:-$sha}"
     done
@@ -61,7 +62,7 @@ assert_rejected() {
 }
 
 write_fixture
-assert_accepted 'matching SHAs'
+assert_accepted 'matching SHAs and Rust toolchain versions'
 write_build release "$sha" build jobs "'carina-provider-fixture' # pinned"
 printf '# uses: carina-rs/provider-release/publish@main\n  # - uses: carina-rs/provider-release/yank@main\n' >> "$workflows_dir/ci.yml"
 printf 'jobs:\n  extra:\n    steps:\n      - uses: "carina-rs/provider-release/publish@%s" # pinned\n      - uses: '\''carina-rs/provider-release/yank@%s'\''\n' "$sha" "$sha" > "$workflows_dir/extra.yaml"
@@ -130,6 +131,18 @@ printf '1.94.0\n1.95.0\n' > "$fixture_dir/.github/wasm-toolchain"
 assert_rejected 'two valid wasm-toolchain versions' 'wasm-toolchain must contain a single exact Rust version (X.Y.Z)'
 rm "$fixture_dir/.github/wasm-toolchain"
 assert_rejected 'a missing wasm-toolchain' 'Missing' 'wasm-toolchain'
+
+write_fixture
+printf '1.94.0\n' > "$fixture_dir/.github/wasm-toolchain"
+assert_rejected 'mismatched Rust toolchain versions' '.github/wasm-toolchain (1.94.0)' 'rust-toolchain.toml [toolchain].channel (1.95.0)'
+printf '[toolchain]\nchannel = "1.94.0"\n' > "$fixture_dir/rust-toolchain.toml"
+assert_accepted 'another matching Rust toolchain version'
+rm "$fixture_dir/rust-toolchain.toml"
+assert_rejected 'a missing rust-toolchain.toml' 'Missing' 'rust-toolchain.toml' '.github/wasm-toolchain'
+
+write_fixture
+printf '[toolchain]\nchannel = "stable"\n' > "$fixture_dir/rust-toolchain.toml"
+assert_rejected 'a floating root toolchain' '.github/wasm-toolchain (1.95.0) must equal' 'rust-toolchain.toml [toolchain].channel (stable)'
 
 assert_accepted 'the real repository' "$repo_root/.github/workflows"
 
