@@ -88,8 +88,8 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "carina-core"
-version = "0.14.0"
-source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
+version = "0.14.1"
+source = "git+https://github.com/carina-rs/carina?rev=ea66ae7a157bd6e28f374f80286a29eb8d77a557#ea66ae7a157bd6e28f374f80286a29eb8d77a557"
 dependencies = [
  "argon2",
  "carina-provider-protocol",
@@ -121,8 +121,8 @@ dependencies = [
 
 [[package]]
 name = "carina-docgen"
-version = "0.10.0"
-source = "git+https://github.com/carina-rs/carina-provider-aws?rev=69fef8545d08bc18efbf3f8bf19df7b6d6a61bca#69fef8545d08bc18efbf3f8bf19df7b6d6a61bca"
+version = "0.11.0"
+source = "git+https://github.com/carina-rs/carina-provider-aws?rev=eaac7a40eecaa56231f174bf9d98357411b08241#eaac7a40eecaa56231f174bf9d98357411b08241"
 dependencies = [
  "anyhow",
  "carina-core",
@@ -133,16 +133,16 @@ dependencies = [
 
 [[package]]
 name = "carina-plugin-bindings-diagnostics"
-version = "0.14.0"
-source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
+version = "0.14.1"
+source = "git+https://github.com/carina-rs/carina?rev=ea66ae7a157bd6e28f374f80286a29eb8d77a557#ea66ae7a157bd6e28f374f80286a29eb8d77a557"
 dependencies = [
  "wit-bindgen 0.54.0",
 ]
 
 [[package]]
 name = "carina-plugin-bindings-http"
-version = "0.14.0"
-source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
+version = "0.14.1"
+source = "git+https://github.com/carina-rs/carina?rev=ea66ae7a157bd6e28f374f80286a29eb8d77a557#ea66ae7a157bd6e28f374f80286a29eb8d77a557"
 dependencies = [
  "carina-plugin-bindings-diagnostics",
  "wasi 0.14.7+wasi-0.2.4",
@@ -151,8 +151,8 @@ dependencies = [
 
 [[package]]
 name = "carina-plugin-bindings-provider"
-version = "0.14.0"
-source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
+version = "0.14.1"
+source = "git+https://github.com/carina-rs/carina?rev=ea66ae7a157bd6e28f374f80286a29eb8d77a557#ea66ae7a157bd6e28f374f80286a29eb8d77a557"
 dependencies = [
  "carina-plugin-bindings-diagnostics",
  "wit-bindgen 0.54.0",
@@ -160,8 +160,8 @@ dependencies = [
 
 [[package]]
 name = "carina-plugin-sdk"
-version = "0.14.0"
-source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
+version = "0.14.1"
+source = "git+https://github.com/carina-rs/carina?rev=ea66ae7a157bd6e28f374f80286a29eb8d77a557#ea66ae7a157bd6e28f374f80286a29eb8d77a557"
 dependencies = [
  "carina-core",
  "carina-plugin-bindings-diagnostics",
@@ -200,7 +200,7 @@ dependencies = [
 [[package]]
 name = "carina-provider-protocol"
 version = "0.3.0"
-source = "git+https://github.com/carina-rs/carina?rev=a3412b6be7ea881eb2e4e16ca2a045f09c9f3616#a3412b6be7ea881eb2e4e16ca2a045f09c9f3616"
+source = "git+https://github.com/carina-rs/carina?rev=ea66ae7a157bd6e28f374f80286a29eb8d77a557#ea66ae7a157bd6e28f374f80286a29eb8d77a557"
 dependencies = [
  "psl",
  "serde",

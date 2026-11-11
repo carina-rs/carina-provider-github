@@ -20,7 +20,7 @@ github.actions.OidcSubject {
 
 ### `claim_keys`
 
-- **Type:** List\<[github.actions.OidcSubject.ClaimKey](#githubactionsoidcsubjectclaimkey)\> (items: 1.., unique items, ordered)
+- **Type:** List\<[github.actions.OidcSubject.ClaimKey](#githubactionsoidcsubjectclaimkey)\> (items: 1..unbounded, unique items, ordered)
 - **Required:** No
 
 Ordered subject claims; omit to use GitHub's default subject
