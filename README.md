@@ -45,11 +45,16 @@ protocol 25 (`carina:provider@0.2.0`).
 ## Local development
 
 Use a Carina CLI compatible with the SDK revision pinned in `Cargo.toml`.
-Build the component (the `wasm32-wasip2` Rust target must be installed):
+Rustup 1.28.0+ reads `rust-toolchain.toml` for the compiler, components and
+`wasm32-wasip2` target. Install them and build the component:
 
 ```sh
+rustup toolchain install
 cargo build -p carina-provider-github --target wasm32-wasip2 --release
 ```
+
+Toolchain upgrades require an explicit PR updating `rust-toolchain.toml`.
+Keep `.github/wasm-toolchain` equal to its channel for provider-release builds.
 
 In a separate directory, create `main.crn` using an absolute path to the
 built component. Use a repository in `carina-test` for acceptance testing:

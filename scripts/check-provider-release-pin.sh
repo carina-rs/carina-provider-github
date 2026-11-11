@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Keep every provider-release action and workflow on the same immutable revision.
+# Keep provider-release revisions consistent and its Rust toolchain equal to the root pin.
 set -euo pipefail
 
 fail() { printf '::error::%s\n' "$*" >&2; exit 1; }
@@ -91,4 +91,10 @@ if ! awk 'END { exit !(NR == 1 && $0 ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) }' "$toolchai
     fail "$toolchain must contain a single exact Rust version (X.Y.Z)."
 fi
 
-printf 'OK: provider-release uses share one full lowercase 40-hex SHA, CI and release use build.yml with identical providers, and wasm-toolchain is a single exact X.Y.Z version.\n'
+pinned_toolchain="$repo_root/rust-toolchain.toml"
+[[ -f "$pinned_toolchain" ]] || fail "Missing $pinned_toolchain; $toolchain must equal its [toolchain].channel."
+pinned_version=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$pinned_toolchain")
+wasm_version=$(cat "$toolchain")
+[[ "$wasm_version" == "$pinned_version" ]] || fail "$toolchain ($wasm_version) must equal $pinned_toolchain [toolchain].channel ($pinned_version)."
+
+printf 'OK: provider-release uses share one full lowercase 40-hex SHA, CI and release use build.yml with identical providers, and wasm-toolchain equals rust-toolchain.toml [toolchain].channel.\n'

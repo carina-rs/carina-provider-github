@@ -13,7 +13,14 @@ REST API and exposes them as Carina resources. See
 
 ## Build and Test Commands
 
+Rustup 1.28.0+ reads `rust-toolchain.toml` for the compiler, components and
+WASM target. Upgrade it in an explicit PR; `.github/wasm-toolchain` must equal
+its channel for provider-release builds.
+
 ```bash
+# Install the pinned toolchain, components and targets
+rustup toolchain install
+
 # Check
 cargo check
 
