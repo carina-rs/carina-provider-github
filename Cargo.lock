@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "carina-provider-github"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "carina-core",
  "carina-plugin-sdk",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "carina-provider-github-docgen"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "carina-docgen",
